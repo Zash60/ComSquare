@@ -4,89 +4,118 @@
 #include <android/log.h>
 #include <SDL.h>
 #include <SDL_main.h>
+#include <SDL_system.h> // Necessário para interagir com Android
 
 #include "SNES.hpp"
 #include "AndroidRenderer.hpp"
 
-// Log tag
-#define LOG_TAG "ComSquare"
+#define LOG_TAG "ComSquare_Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// Globais
 std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
 std::unique_ptr<ComSquare::SNES> g_snes;
+std::string g_romPath = "";
+bool g_romLoaded = false;
+bool g_requestFilePicker = false;
+
+// Função chamada pelo Java quando o arquivo é selecionado
+extern "C" JNIEXPORT void JNICALL
+Java_com_comsquare_emulator_MainActivity_onRomSelectedNative(JNIEnv* env, jobject, jstring path) {
+    const char *nativePath = env->GetStringUTFChars(path, 0);
+    g_romPath = std::string(nativePath);
+    LOGI("ROM Path recebido no C++: %s", nativePath);
+    
+    // Tenta carregar imediatamente
+    if (g_snes) {
+        try {
+            g_snes->loadRom(g_romPath);
+            g_romLoaded = true;
+            LOGI("ROM carregada com sucesso!");
+        } catch (const std::exception& e) {
+            LOGE("Erro ao carregar ROM: %s", e.what());
+        }
+    }
+    env->ReleaseStringUTFChars(path, nativePath);
+}
+
+// Helper para chamar o método Java 'openFileBrowser'
+void callJavaOpenFilePicker() {
+    JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+    jobject activity = (jobject)SDL_AndroidGetActivity();
+    jclass clazz = env->GetObjectClass(activity);
+    jmethodID methodID = env->GetMethodID(clazz, "openFileBrowser", "()V");
+    
+    if (methodID) {
+        env->CallVoidMethod(activity, methodID);
+    } else {
+        LOGE("Não foi possível encontrar o método openFileBrowser no Java");
+    }
+    
+    env->DeleteLocalRef(activity);
+    env->DeleteLocalRef(clazz);
+}
 
 int main(int argc, char* argv[]) {
-    LOGI("Iniciando SDL Main...");
-
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
-        LOGE("SDL_Init failed: %s", SDL_GetError());
+        LOGE("SDL_Init falhou: %s", SDL_GetError());
         return 1;
     }
 
-    // Cria janela SDL
     SDL_Window* window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
-    if (!window) {
-        LOGE("Failed to create window: %s", SDL_GetError());
-        return 1;
-    }
-
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) {
-         LOGE("Failed to create renderer: %s", SDL_GetError());
-         return 1;
-    }
+    
+    // Textura para o emulador
+    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 1024, 1024);
 
-    // Tenta iniciar o SNES
+    // Inicializa Core
     g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
-    // Hack: Injeta os ponteiros do SDL no nosso renderer customizado
-    g_renderer->window = window;
-    g_renderer->renderer = renderer;
-    g_renderer->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 1024, 1024);
-
+    // Não usamos putPixel no update loop do SDL direto, 
+    // mas precisamos que o SNES tenha uma referencia válida se ele chamar algo internamente.
+    
     g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
-
-    // Tenta carregar uma ROM hardcoded (coloque o arquivo em /sdcard/Download/game.sfc para testar depois)
-    // Ou apenas desenha uma cor para teste
-    bool romLoaded = false;
-    /* 
-    try {
-        g_snes->loadRom("/sdcard/Download/game.sfc"); // Caminho de teste
-        romLoaded = true;
-    } catch (...) {} 
-    */
 
     bool running = true;
     SDL_Event event;
-    int color = 0;
 
     while (running) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT || event.type == SDL_APP_TERMINATING) {
                 running = false;
             }
-            // Toque na tela fecha ou faz algo
-            if (event.type == SDL_FINGERDOWN) {
-                 LOGI("Touch detected!");
+            
+            // Se tocar na tela e não tiver ROM, abre o seletor
+            if (event.type == SDL_FINGERDOWN || event.type == SDL_MOUSEBUTTONDOWN) {
+                if (!g_romLoaded) {
+                    LOGI("Toque detectado. Abrindo seletor de arquivos...");
+                    callJavaOpenFilePicker();
+                }
             }
         }
 
-        if (romLoaded) {
+        if (g_romLoaded) {
+            // --- MODO EMULAÇÃO ---
             try {
                 g_snes->update();
-                // O update chama drawScreen() do renderer
+                
+                // Renderiza o frame do emulador
+                // Copia do buffer interno do AndroidRenderer para a textura SDL
+                SDL_UpdateTexture(texture, nullptr, g_renderer->getPixels(), 1024 * 4);
+                SDL_RenderClear(renderer);
+                SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+                SDL_RenderPresent(renderer);
+                
             } catch (...) {}
         } else {
-            // MODO DE DEBUG VISUAL:
-            // Se não tem ROM, pisca a tela para provar que o vídeo funciona
-            color = (color + 5) % 255;
-            SDL_SetRenderDrawColor(renderer, color, 0, 0, 255); // Vermelho pulsante
+            // --- MODO ESPERA (Tela Azul) ---
+            // Azul = Aguardando Toque para carregar ROM
+            SDL_SetRenderDrawColor(renderer, 0, 0, 200, 255); 
             SDL_RenderClear(renderer);
             SDL_RenderPresent(renderer);
         }
         
-        // Limita FPS tosco
-        SDL_Delay(16);
+        SDL_Delay(16); // ~60 FPS cap
     }
 
     SDL_Quit();
