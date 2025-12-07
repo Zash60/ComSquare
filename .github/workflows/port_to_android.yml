@@ -1,4 +1,4 @@
-name: Port to SDL2 (Stable Rendering)
+name: Fix SDL MainActivity Logic
 
 on:
   workflow_dispatch:
@@ -7,251 +7,13 @@ permissions:
   contents: write
 
 jobs:
-  sdl2-migration:
+  fix-kotlin:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. Baixa e Configura o SDL2 na pasta cpp
-      - name: Download and Setup SDL2
-        run: |
-          mkdir -p app/src/main/cpp
-          # Baixa SDL2 2.28.5 (Versão estável)
-          wget https://github.com/libsdl-org/SDL/releases/download/release-2.28.5/SDL2-2.28.5.zip -O sdl2.zip
-          unzip -q sdl2.zip
-          # Move para a pasta correta renomeando
-          rm -rf app/src/main/cpp/SDL2
-          mv SDL2-2.28.5 app/src/main/cpp/SDL2
-          rm sdl2.zip
-
-      # 2. Copia o SDLActivity.java oficial para o pacote Java
-      # Isso é essencial para o SDL funcionar no Android
-      - name: Install SDLActivity.java
-        run: |
-          mkdir -p app/src/main/java/org/libsdl/app
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLActivity.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/SDL.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLControllerManager.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/SDLAudioManager.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/HIDDevice.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/HIDDeviceManager.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/HIDDeviceBLESteamController.java app/src/main/java/org/libsdl/app/
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/HIDDeviceUSB.java app/src/main/java/org/libsdl/app/
-
-      # 3. Cria o CMakeLists.txt integrando SDL2
-      - name: Update CMakeLists.txt
-        run: |
-          cat <<EOF > app/src/main/cpp/CMakeLists.txt
-          cmake_minimum_required(VERSION 3.10.2)
-          project("comsquare")
-
-          set(ROOT_DIR \${CMAKE_CURRENT_SOURCE_DIR})
-          include_directories("\${ROOT_DIR}/sources")
-          
-          # Configura SDL2
-          add_subdirectory(SDL2)
-          include_directories(SDL2/include)
-
-          file(GLOB_RECURSE CORE_SOURCES
-              "\${ROOT_DIR}/sources/*.cpp"
-              "\${ROOT_DIR}/sources/*.c"
-              "\${ROOT_DIR}/native-lib.cpp"
-          )
-
-          # Filtra arquivos antigos/incompatíveis
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Qt.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*SF.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Debugger.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*tests.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
-
-          add_library(comsquare SHARED \${CORE_SOURCES})
-
-          find_library(log-lib log)
-          find_library(android-lib android)
-          find_library(gles-lib GLESv2)
-
-          # Linka com SDL2 e bibliotecas do sistema
-          target_link_libraries(comsquare 
-              SDL2::SDL2 
-              SDL2::SDL2-static 
-              \${log-lib} 
-              \${android-lib} 
-              \${gles-lib}
-          )
-          EOF
-
-      # 4. Implementa o Renderer baseado em SDL (AndroidRenderer.hpp)
-      - name: Create SDL Renderer Header
-        run: |
-          cat <<EOF > app/src/main/cpp/AndroidRenderer.hpp
-          #pragma once
-
-          #include "Renderer/IRenderer.hpp"
-          #include <SDL.h>
-          #include <vector>
-          #include <android/log.h>
-
-          namespace ComSquare::Renderer {
-
-              class AndroidRenderer : public IRenderer {
-              public:
-                  SDL_Window* window = nullptr;
-                  SDL_Renderer* renderer = nullptr;
-                  SDL_Texture* texture = nullptr;
-                  std::vector<uint32_t> pixelBuffer;
-
-                  // Buffer interno do SNES (geralmente 1024x1024 no core atual)
-                  const int BUFFER_WIDTH = 1024;
-                  const int BUFFER_HEIGHT = 1024;
-
-                  AndroidRenderer() {
-                      pixelBuffer.resize(BUFFER_WIDTH * BUFFER_HEIGHT, 0xFF000000);
-                  }
-
-                  void initSDL() {
-                      // SDL já foi iniciado no main, aqui pegamos a janela se necessário ou criamos recursos
-                      window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
-                      renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-                      // Textura para o buffer do SNES (Streaming para atualização constante)
-                      texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, BUFFER_WIDTH, BUFFER_HEIGHT);
-                      
-                      // Limpa a tela
-                      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                      SDL_RenderClear(renderer);
-                      SDL_RenderPresent(renderer);
-                  }
-
-                  void setWindowName(std::string &name) override {}
-
-                  void drawScreen() override {
-                      if (!renderer || !texture) return;
-
-                      // Atualiza a textura com os pixels do buffer
-                      SDL_UpdateTexture(texture, nullptr, pixelBuffer.data(), BUFFER_WIDTH * sizeof(uint32_t));
-                      
-                      // Limpa
-                      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                      SDL_RenderClear(renderer);
-                      
-                      // Desenha a textura esticada na tela (mantendo aspecto se possível, aqui estica tudo)
-                      SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-                      
-                      // Mostra
-                      SDL_RenderPresent(renderer);
-                  }
-
-                  void putPixel(unsigned y, unsigned x, uint32_t rgba) override {
-                      if (x < BUFFER_WIDTH && y < BUFFER_HEIGHT) {
-                          // RGBA8888 no SDL vs uint32 do core. Pode precisar de ajuste de endianness (ABGR vs ARGB)
-                          // O Core geralmente manda 0xRRGGBBAA ou similar. 
-                          // Vamos assumir compatibilidade direta por enquanto.
-                          pixelBuffer[y * BUFFER_WIDTH + x] = rgba;
-                      }
-                  }
-
-                  void createWindow(SNES &snes, int maxFPS) override {
-                      // Stub
-                  }
-
-                  void playAudio(std::span<int16_t> samples) override {
-                      // Stub (SDL Audio pode ser adicionado aqui depois)
-                  }
-              };
-          }
-          EOF
-
-      # 5. Reescreve native-lib.cpp para usar SDL_main
-      # SDL no Android sequestra o main(), então a estrutura muda.
-      - name: Rewrite native-lib.cpp
-        run: |
-          cat <<EOF > app/src/main/cpp/native-lib.cpp
-          #include <jni.h>
-          #include <string>
-          #include <memory>
-          #include <android/log.h>
-          #include <SDL.h>
-          #include <SDL_main.h>
-
-          #include "SNES.hpp"
-          #include "AndroidRenderer.hpp"
-
-          // Globais
-          std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
-          std::unique_ptr<ComSquare::SNES> g_snes;
-          std::string g_romPath = "";
-          bool g_romLoaded = false;
-
-          // Função JNI para receber o caminho da ROM do Kotlin
-          extern "C" JNIEXPORT void JNICALL
-          Java_com_comsquare_emulator_MainActivity_loadRomNative(JNIEnv* env, jobject, jstring path) {
-              const char *nativePath = env->GetStringUTFChars(path, 0);
-              g_romPath = std::string(nativePath);
-              __android_log_print(ANDROID_LOG_INFO, "ComSquare", "ROM Path received: %s", nativePath);
-              env->ReleaseStringUTFChars(path, nativePath);
-          }
-
-          // Ponto de entrada SDL
-          int main(int argc, char* argv[]) {
-              if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
-                  __android_log_print(ANDROID_LOG_ERROR, "ComSquare", "SDL_Init failed: %s", SDL_GetError());
-                  return 1;
-              }
-
-              g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
-              g_renderer->initSDL(); // Cria janela e renderer SDL
-              
-              g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
-
-              bool running = true;
-              SDL_Event event;
-
-              while (running) {
-                  while (SDL_PollEvent(&event)) {
-                      if (event.type == SDL_QUIT) {
-                          running = false;
-                      }
-                      if (event.type == SDL_APP_TERMINATING) {
-                          running = false;
-                      }
-                  }
-
-                  // Lógica de Carga de ROM
-                  if (!g_romLoaded && !g_romPath.empty()) {
-                      try {
-                          g_snes->loadRom(g_romPath);
-                          g_romLoaded = true;
-                          __android_log_print(ANDROID_LOG_INFO, "ComSquare", "ROM Loaded Successfully in Core");
-                      } catch (const std::exception& e) {
-                          __android_log_print(ANDROID_LOG_ERROR, "ComSquare", "Load Error: %s", e.what());
-                          g_romPath = ""; // Tenta de novo se o usuário mandar outro
-                      }
-                  }
-
-                  if (g_romLoaded) {
-                      try {
-                          g_snes->update();
-                          // O update do SNES chama g_renderer->drawScreen() internamente
-                      } catch (...) {
-                           // Evita crash
-                      }
-                  } else {
-                      // Se não tem ROM, desenha tela preta ou de espera
-                      SDL_SetRenderDrawColor(g_renderer->renderer, 20, 20, 20, 255);
-                      SDL_RenderClear(g_renderer->renderer);
-                      SDL_RenderPresent(g_renderer->renderer);
-                      SDL_Delay(100);
-                  }
-              }
-
-              SDL_Quit();
-              return 0;
-          }
-          EOF
-
-      # 6. Atualiza MainActivity.kt para usar SDLActivity e injetar o botão
-      - name: Update MainActivity.kt
+      - name: Rewrite MainActivity.kt with Legacy Intent API
         run: |
           cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
           package com.comsquare.emulator
@@ -262,27 +24,26 @@ jobs:
           import android.widget.FrameLayout
           import android.view.Gravity
           import android.view.View
-          import androidx.activity.result.contract.ActivityResultContracts
           import java.io.File
           import java.io.FileOutputStream
           import android.net.Uri
           import android.graphics.Color
+          import android.content.Intent
+          import android.app.Activity
 
           class MainActivity : SDLActivity() {
 
-              // Nome da biblioteca definida no CMake
+              // Código de requisição para identificar o retorno do seletor de arquivos
+              private val PICK_ROM_CODE = 123
+
               override fun getLibraries(): Array<String> {
                   return arrayOf("comsquare")
-              }
-
-              private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-                  uri?.let { loadGameFromUri(it) }
               }
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   
-                  // SDLActivity cria seu próprio layout. Vamos adicionar um botão por cima.
+                  // Botão Flutuante (Overlay)
                   val loadButton = Button(this)
                   loadButton.text = "LOAD ROM"
                   loadButton.setBackgroundColor(Color.WHITE)
@@ -294,17 +55,31 @@ jobs:
                       FrameLayout.LayoutParams.WRAP_CONTENT
                   )
                   params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                  params.topMargin = 100
+                  params.topMargin = 150 // Margem para não ficar em cima da status bar
                   
-                  // O layout principal do SDL é um FrameLayout (mLayout)
                   addContentView(loadButton, params)
 
                   loadButton.setOnClickListener {
-                      filePickerLauncher.launch(arrayOf("*/*"))
+                      // Usa a API clássica de Intent, compatível com SDLActivity
+                      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                          addCategory(Intent.CATEGORY_OPENABLE)
+                          type = "*/*" // Pode filtrar por arquivos específicos se quiser
+                      }
+                      startActivityForResult(intent, PICK_ROM_CODE)
                   }
                   
-                  // Salva referência para esconder depois
                   loadButton.tag = "btnLoad"
+              }
+
+              // Captura o resultado da seleção do arquivo
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  
+                  if (requestCode == PICK_ROM_CODE && resultCode == Activity.RESULT_OK) {
+                      data?.data?.let { uri ->
+                          loadGameFromUri(uri)
+                      }
+                  }
               }
 
               private fun loadGameFromUri(uri: Uri) {
@@ -317,10 +92,10 @@ jobs:
                       inputStream?.close()
                       outputStream.close()
 
-                      // Passa o caminho para o C++
+                      // Passa o caminho absoluto para o C++
                       loadRomNative(tempFile.absolutePath)
                       
-                      // Esconde o botão (encontra pela tag ou guarda referência)
+                      // Esconde o botão após carregar
                       val btn = window.decorView.findViewWithTag<Button>("btnLoad")
                       btn?.visibility = View.GONE
                       
@@ -329,7 +104,6 @@ jobs:
                   }
               }
 
-              // Função JNI implementada no native-lib.cpp
               external fun loadRomNative(path: String)
           }
           EOF
@@ -338,10 +112,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/cpp/CMakeLists.txt
-          git add app/src/main/cpp/AndroidRenderer.hpp
-          git add app/src/main/cpp/native-lib.cpp
           git add app/src/main/java/com/comsquare/emulator/MainActivity.kt
-          git add app/src/main/java/org/libsdl/app/*.java
-          git commit -m "Major Refactor: Switch to SDL2 for Rendering and Window Management"
+          git commit -m "Fix: Replace registerForActivityResult with startActivityForResult for SDL compatibility"
           git push
