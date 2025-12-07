@@ -1,4 +1,4 @@
-name: Fix SFML Vector2 Dependency
+name: Fix GCC Header for Android
 
 on:
   workflow_dispatch:
@@ -7,122 +7,120 @@ permissions:
   contents: write
 
 jobs:
-  fix-code:
+  fix-header:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Rewrite Vector2.hpp without SFML
+      - name: Replace stdint-gcc.h with cstdint
         run: |
-          # Sobrescreve o arquivo Vector2.hpp com uma versão pura C++
-          cat <<EOF > app/src/main/cpp/sources/Models/Vector2.hpp
+          # O arquivo PPUUtils.hpp inclui um header específico do GCC que não existe no Android (Clang).
+          # Vamos substituí-lo pelo padrão do C++ <cstdint>.
+          
+          FILE_PATH="app/src/main/cpp/sources/PPU/PPUUtils.hpp"
+          
+          # Sobrescreve o arquivo com a correção
+          cat <<EOF > $FILE_PATH
           #pragma once
 
-          #include <ostream>
+          #include <cstdint>
+          #include <cstddef>
+          #include <memory>
+          #include <array>
+          #include "Models/Vector2.hpp"
 
-          namespace ComSquare
+          namespace ComSquare::PPU
           {
-              template<typename T>
-              class Vector2
-              {
-              public:
-                  T x;
-                  T y;
-
-                  Vector2() : x(0), y(0) {}
-
-                  Vector2(T _x, T _y) : x(_x), y(_y) {}
-
-                  // Construtor SFML removido para compatibilidade com Android
-
-                  template<typename T2>
-                  Vector2<T> &operator+=(const Vector2<T2> &vec)
-                  {
-                      this->x += vec.x;
-                      this->y += vec.y;
-                      return *this;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator+(const Vector2<T2> &vec) const
-                  {
-                      return Vector2<T>(this->x + vec.x, this->y + vec.y);
-                  }
-
-                  template<typename T2>
-                  Vector2<T> &operator-=(const Vector2<T2> &vec)
-                  {
-                      this->x -= vec.x;
-                      this->y -= vec.y;
-                      return *this;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator-(const Vector2<T2> &vec) const
-                  {
-                      return Vector2<T>(this->x - vec.x, this->y - vec.y);
-                  }
-
-                  template<typename T2>
-                  Vector2<T> &operator*=(T2 d)
-                  {
-                      this->x *= d;
-                      this->y *= d;
-                      return *this;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator*(T2 d) const
-                  {
-                      return Vector2<T>(this->x * d, this->y * d);
-                  }
-
-                  template<typename T2>
-                  T operator*(Vector2<T> &b) const
-                  {
-                      return this->x * b.x + this->y * b.y;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator/=(Vector2<T2> &b)
-                  {
-                      this->x /= b.x;
-                      this->y /= b.y;
-                      return this;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator/(Vector2<T2> &b) const
-                  {
-                      return Vector2<T>(this->x / b.x, this->y / b.y);
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator/=(T2 b)
-                  {
-                      this->x /= b;
-                      this->y /= b;
-                      return this;
-                  }
-
-                  template<typename T2>
-                  Vector2<T> operator/(T2 b) const
-                  {
-                      return Vector2<T>(this->x / b, this->y / b);
-                  }
-              };
-
-              typedef Vector2<float> Vector2f;
-              typedef Vector2<unsigned> Vector2u;
-              typedef Vector2<int> Vector2i;
+              class PPU;
           }
 
-          template<typename T>
-          std::ostream &operator<<(std::ostream &s, const ComSquare::Vector2<T> &v)
+          namespace ComSquare::PPU::Utils
           {
-              s << v.x << " " << v.y;
-              return s;
+              //! @brief Transform CGRAM color data to 8bits
+              //! @note Used with b, g and r values
+              //! @return The 8 bit value of the color
+              inline uint8_t to8Bit(int color)
+              {
+                  return static_cast<uint8_t>((color << 3) + (color >> 2));
+              }
+              //! @brief Transform SNES color code BGR to uint32_t RGBA
+              //! @param CGRAMColor The color of the CGRAM
+              //! @return The CGRAM color to RGBA format
+              uint32_t CGRAMColorToRGBA(uint16_t CGRAMColor);
+              //! @brief Used to parse easily VRAM Tile information
+              union TileData {
+                  struct {
+                      //! @brief Tile X offset
+                      uint16_t posX: 4;
+                      //! @brief Tile Y offset
+                      uint16_t posY: 6;
+                      //! @brief Palette number used by the Tile
+                      uint16_t palette: 3;
+                      //! @brief True if the Tile has priority
+                      uint16_t tilePriority: 1;
+                      //! @brief True if the Tile need to be horizontally flipped
+                      uint16_t horizontalFlip: 1;
+                      //! @brief True if the Tile need to be vertically flipped
+                      uint16_t verticalFlip: 1;
+                  };
+                  uint16_t raw = 0;
+              };
+
+              //! @brief Struct to save all specific variables needed for the registers (prev values for example)
+              struct PpuState {
+                  //! @brief Used by by all eight BGnxOFS registers (0x210D - 0x2114)
+                  uint8_t hvSharedScrollPrevValue;
+                  //! @brief Shared by the four BGnHOFS registers
+                  uint8_t hScrollPrevValue;
+              };
+
+              template <std::size_t DEST_SIZE_Y, std::size_t DEST_SIZE_X, std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
+              void merge2DArray(std::array<std::array<uint32_t, DEST_SIZE_X>, DEST_SIZE_Y> &bufferDest,
+                                const std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &bufferSrc,
+                                const Vector2<int> &offset)
+              {
+                  int offsetY = offset.y;
+                  for (auto &row : bufferSrc) {
+                      std::copy(row.begin(), row.end(), bufferDest[offsetY++].begin() + offset.x);
+                  }
+              }
+
+              template <std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
+              void VFlipArray(std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &array,
+                              const Vector2<int> &size,
+                              const Vector2<int> &offset = {0, 0})
+              {
+                  for (int i = offset.y; i < offset.y + size.y; i++) {
+                      std::reverse(array[i].begin() + offset.x, array[i].begin() + offset.x + size.x);
+                  }
+              }
+
+              template <std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
+              void HFlipArray(std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &array,
+                              const Vector2<int> &size,
+                              const Vector2<int> &offset = {0, 0})
+              {
+                  std::reverse(array.begin() + offset.x, array.begin() + offset.x + size.x);
+              }
+
+              //! @brief Add a bg buffer to another buffer
+              template <std::size_t DEST_SIZE_X, std::size_t DEST_SIZE_Y, std::size_t SRC_SIZE_X, std::size_t SRC_SIZE_Y>
+              static void addBuffer(std::array<std::array<uint32_t, DEST_SIZE_Y>, DEST_SIZE_X> &bufferDest,
+                             const std::array<std::array<uint32_t, SRC_SIZE_Y>, SRC_SIZE_X> &bufferSrc)
+              {
+                  int i = 0;
+                  int j = 0;
+                  for (const auto &sourceRow : bufferSrc) {
+                      for (const auto &pixel : sourceRow) {
+                          if (pixel > 0xFF)
+                              bufferDest[i][j] = pixel;
+                          j++;
+                      };
+                      j = 0;
+                      i++;
+                  };
+              }
           }
           EOF
 
@@ -130,6 +128,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/cpp/sources/Models/Vector2.hpp
-          git commit -m "Fix: Remove SFML dependency from Vector2.hpp for Android build"
+          git add app/src/main/cpp/sources/PPU/PPUUtils.hpp
+          git commit -m "Fix: Replace stdint-gcc.h with cstdint for Android Clang compatibility"
           git push
