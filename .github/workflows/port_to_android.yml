@@ -1,4 +1,4 @@
-name: Fix SDL2 CMake Configuration
+name: Fix Missing SDL Java Classes
 
 on:
   workflow_dispatch:
@@ -7,62 +7,26 @@ permissions:
   contents: write
 
 jobs:
-  fix-cmake:
+  fix-java-files:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Overwrite CMakeLists.txt
+      # Copia TODOS os arquivos .java do diretório do SDL2 para o pacote do aplicativo
+      # Isso garante que SDLSurface.java e outros helpers sejam incluídos
+      - name: Copy missing SDL Java files
         run: |
-          cat <<EOF > app/src/main/cpp/CMakeLists.txt
-          cmake_minimum_required(VERSION 3.10.2)
-          project("comsquare")
-
-          set(ROOT_DIR \${CMAKE_CURRENT_SOURCE_DIR})
-          include_directories("\${ROOT_DIR}/sources")
-          
-          # Configura SDL2 (Define como Shared para Android)
-          set(SDL_SHARED ON CACHE BOOL "Build shared SDL2 library" FORCE)
-          set(SDL_STATIC OFF CACHE BOOL "Build static SDL2 library" FORCE)
-          set(SDL_TEST OFF CACHE BOOL "Build SDL2 test programs" FORCE)
-          
-          add_subdirectory(SDL2)
-          include_directories(SDL2/include)
-
-          file(GLOB_RECURSE CORE_SOURCES
-              "\${ROOT_DIR}/sources/*.cpp"
-              "\${ROOT_DIR}/sources/*.c"
-              "\${ROOT_DIR}/native-lib.cpp"
-          )
-
-          # Filtros
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Qt.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*SF.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Debugger.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*tests.*")
-          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
-
-          add_library(comsquare SHARED \${CORE_SOURCES})
-
-          find_library(log-lib log)
-          find_library(android-lib android)
-          find_library(gles-lib GLESv2)
-
-          # Linka apenas com a versão compartilhada do SDL2
-          # O target SDL2::SDL2 aponta para a lib compartilhada
-          target_link_libraries(comsquare 
-              SDL2::SDL2 
-              \${log-lib} 
-              \${android-lib} 
-              \${gles-lib}
-          )
-          EOF
+          echo "Copiando arquivos Java do SDL2..."
+          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/*.java app/src/main/java/org/libsdl/app/
 
       - name: Commit and Push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/cpp/CMakeLists.txt
-          git commit -m "Fix: Resolve SDL2 static/shared conflict in CMake"
+          
+          # Adiciona os novos arquivos copiados
+          git add app/src/main/java/org/libsdl/app/*.java
+          
+          git commit -m "Fix: Add missing SDLSurface.java and other helpers"
           git push
