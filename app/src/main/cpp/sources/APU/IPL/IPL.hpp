@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include "Memory/AMemory.hpp"
 
 namespace ComSquare::APU::IPL
