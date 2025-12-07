@@ -1,4 +1,4 @@
-name: Fix SurfaceView Lifecycle Crash
+name: Fix Black Screen and UI Logic
 
 on:
   workflow_dispatch:
@@ -7,19 +7,64 @@ permissions:
   contents: write
 
 jobs:
-  fix-ui-crash:
+  fix-app-logic:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Overwrite MainActivity.kt with Robust Loop
+      # 1. Garante um Layout robusto e visível
+      - name: Overwrite activity_main.xml
+        run: |
+          mkdir -p app/src/main/res/layout
+          cat <<EOF > app/src/main/res/layout/activity_main.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#000000">
+
+              <SurfaceView
+                  android:id="@+id/emulatorSurface"
+                  android:layout_width="match_parent"
+                  android:layout_height="match_parent" />
+
+              <LinearLayout
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_gravity="center"
+                  android:orientation="vertical"
+                  android:gravity="center">
+
+                  <Button
+                      android:id="@+id/btnLoadRom"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:text="SELECT ROM FILE"
+                      android:textSize="18sp"
+                      android:padding="16dp"
+                      android:backgroundTint="#FFFFFF"
+                      android:textColor="#000000"
+                      android:textStyle="bold" />
+
+                  <TextView
+                      android:id="@+id/tvStatus"
+                      android:layout_width="wrap_content"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="16dp"
+                      android:text="Press button to load game"
+                      android:textColor="#FFFFFF"
+                      android:textSize="14sp" />
+              </LinearLayout>
+          </FrameLayout>
+          EOF
+
+      # 2. MainActivity Blindada (Sem erros de Kotlin, Sem Crash de Surface)
+      - name: Overwrite MainActivity.kt
         run: |
           cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
           package com.comsquare.emulator
 
-          import android.app.Activity
-          import android.content.Intent
           import android.graphics.Bitmap
           import android.graphics.Canvas
           import android.graphics.Color
@@ -48,11 +93,8 @@ jobs:
               private var emulatorJob: Job? = null
               private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
               
-              // Controle de estado volátil para threads
-              @Volatile
-              private var isRunning = false
-              @Volatile
-              private var isSurfaceReady = false
+              @Volatile private var isRunning = false
+              @Volatile private var isSurfaceValid = false
               
               private val renderDst = Rect()
               private val renderSrc = Rect(0, 0, 256, 224)
@@ -69,7 +111,12 @@ jobs:
                   tvStatus = findViewById(R.id.tvStatus)
                   btnLoadRom = findViewById(R.id.btnLoadRom)
 
+                  // Carrega biblioteca C++
                   initNative()
+
+                  // Configura transparência e formato para evitar bugs visuais
+                  surfaceView.setZOrderOnTop(false) 
+                  surfaceView.holder.setFormat(PixelFormat.RGBA_8888)
 
                   btnLoadRom.setOnClickListener {
                       filePickerLauncher.launch(arrayOf("*/*"))
@@ -77,12 +124,8 @@ jobs:
 
                   surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                       override fun surfaceCreated(holder: SurfaceHolder) {
-                          // Define o formato de pixel para evitar avisos do HWUI
-                          holder.setFormat(PixelFormat.RGBA_8888)
-                          isSurfaceReady = true
-                          if (isRunning) {
-                              startEmulatorLoop(holder)
-                          }
+                          isSurfaceValid = true
+                          if (isRunning) startEmulatorLoop(holder)
                       }
 
                       override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -90,9 +133,8 @@ jobs:
                       }
 
                       override fun surfaceDestroyed(holder: SurfaceHolder) {
-                          isSurfaceReady = false
-                          // Não cancelamos o job aqui para não matar o estado do emulador ao rotacionar,
-                          // apenas paramos de desenhar. O loop checa isSurfaceReady.
+                          isSurfaceValid = false
+                          // Não cancelamos o job aqui para não perder o estado do emulador, apenas paramos o desenho
                       }
                   })
               }
@@ -109,20 +151,18 @@ jobs:
 
                       loadRomNative(tempFile.absolutePath)
                       
+                      // UI Update
                       tvStatus.visibility = View.GONE
                       btnLoadRom.visibility = View.GONE
                       
                       isRunning = true
-                      // Se a superfície já existe, inicia. Se não, o callback surfaceCreated iniciará.
-                      if (isSurfaceReady) {
-                          startEmulatorLoop(surfaceView.holder)
-                      }
+                      if (isSurfaceValid) startEmulatorLoop(surfaceView.holder)
                       
-                      Toast.makeText(this, "ROM Loaded!", Toast.LENGTH_SHORT).show()
+                      Toast.makeText(this, "Game Loaded!", Toast.LENGTH_SHORT).show()
                       
                   } catch (e: Exception) {
                       tvStatus.text = "Error: \${e.message}"
-                      e.printStackTrace()
+                      tvStatus.setTextColor(Color.RED)
                   }
               }
 
@@ -133,32 +173,25 @@ jobs:
                       while (isActive && isRunning) {
                           val startTime = System.currentTimeMillis()
                           
-                          // 1. Atualiza Core C++
+                          // 1. C++ Core Update
                           updateFrame()
                           
-                          // 2. Copia pixels para Bitmap
-                          renderToBitmap(renderBitmap)
-                          
-                          // 3. Desenha na tela (BLINDADO)
-                          if (isSurfaceReady) {
-                              var canvas: Canvas? = null
+                          // 2. Render Check
+                          if (isSurfaceValid && holder.surface.isValid) {
                               try {
-                                  canvas = holder.lockCanvas()
+                                  // Lock Canvas (Kotlin warning fixed: direct assignment)
+                                  val canvas = holder.lockCanvas()
                                   if (canvas != null) {
-                                      // Limpa o fundo (ajuda com artefatos de rotação)
                                       canvas.drawColor(Color.BLACK)
-                                      // Desenha o jogo escalado
                                       canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
                                       holder.unlockCanvasAndPost(canvas)
                                   }
                               } catch (e: Exception) {
-                                  // Loga o erro, mas não crashta o app. 
-                                  // É comum Surface falhar durante rotação/minimizar.
-                                  e.printStackTrace()
+                                  // Ignora erros de surface perdida durante rotação
                               }
                           }
 
-                          // Limitador de FPS (~60 FPS)
+                          // 3. FPS Limiter (~60 FPS)
                           val diff = System.currentTimeMillis() - startTime
                           if (diff < 16) delay(16 - diff)
                       }
@@ -180,6 +213,7 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          git add app/src/main/res/layout/activity_main.xml
           git add app/src/main/java/com/comsquare/emulator/MainActivity.kt
-          git commit -m "Fix: SurfaceView lifecycle crash and PixelFormat warning"
+          git commit -m "UI Fix: Visible Load Button and safer SurfaceView loop"
           git push
