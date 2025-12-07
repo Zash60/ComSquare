@@ -1,4 +1,4 @@
-name: Fix Black Screen and UI Logic
+name: Switch to C++ Native Rendering
 
 on:
   workflow_dispatch:
@@ -7,71 +7,150 @@ permissions:
   contents: write
 
 jobs:
-  fix-app-logic:
+  native-render:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. Garante um Layout robusto e visível
-      - name: Overwrite activity_main.xml
+      # 1. Atualiza CMakeLists.txt para incluir a lib 'android' (necessária para ANativeWindow)
+      - name: Update CMakeLists.txt
         run: |
-          mkdir -p app/src/main/res/layout
-          cat <<EOF > app/src/main/res/layout/activity_main.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent"
-              android:background="#000000">
+          cat <<EOF > app/src/main/cpp/CMakeLists.txt
+          cmake_minimum_required(VERSION 3.10.2)
+          project("comsquare")
 
-              <SurfaceView
-                  android:id="@+id/emulatorSurface"
-                  android:layout_width="match_parent"
-                  android:layout_height="match_parent" />
+          set(ROOT_DIR \${CMAKE_CURRENT_SOURCE_DIR})
+          include_directories("\${ROOT_DIR}/sources")
 
-              <LinearLayout
-                  android:layout_width="wrap_content"
-                  android:layout_height="wrap_content"
-                  android:layout_gravity="center"
-                  android:orientation="vertical"
-                  android:gravity="center">
+          file(GLOB_RECURSE CORE_SOURCES
+              "\${ROOT_DIR}/sources/*.cpp"
+              "\${ROOT_DIR}/sources/*.c"
+              "\${ROOT_DIR}/native-lib.cpp"
+          )
 
-                  <Button
-                      android:id="@+id/btnLoadRom"
-                      android:layout_width="wrap_content"
-                      android:layout_height="wrap_content"
-                      android:text="SELECT ROM FILE"
-                      android:textSize="18sp"
-                      android:padding="16dp"
-                      android:backgroundTint="#FFFFFF"
-                      android:textColor="#000000"
-                      android:textStyle="bold" />
+          # Filtros
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Qt.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*SF.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Debugger.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*tests.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 
-                  <TextView
-                      android:id="@+id/tvStatus"
-                      android:layout_width="wrap_content"
-                      android:layout_height="wrap_content"
-                      android:layout_marginTop="16dp"
-                      android:text="Press button to load game"
-                      android:textColor="#FFFFFF"
-                      android:textSize="14sp" />
-              </LinearLayout>
-          </FrameLayout>
+          add_library(comsquare SHARED \${CORE_SOURCES})
+
+          # Adiciona a biblioteca 'android' para manipulação nativa de janelas
+          find_library(android-lib android)
+          find_library(log-lib log)
+
+          target_link_libraries(comsquare \${log-lib} \${android-lib})
           EOF
 
-      # 2. MainActivity Blindada (Sem erros de Kotlin, Sem Crash de Surface)
+      # 2. Implementa renderização C++ pura em native-lib.cpp
+      - name: Overwrite native-lib.cpp
+        run: |
+          cat <<EOF > app/src/main/cpp/native-lib.cpp
+          #include <jni.h>
+          #include <string>
+          #include <memory>
+          #include <android/log.h>
+          #include <android/native_window.h>
+          #include <android/native_window_jni.h>
+
+          #include "SNES.hpp"
+          #include "AndroidRenderer.hpp"
+
+          // Globais
+          std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
+          std::unique_ptr<ComSquare::SNES> g_snes;
+          ANativeWindow* g_window = nullptr;
+
+          // Resolução nativa do SNES (geralmente 256x224, mas o buffer interno é 1024)
+          // Vamos configurar o buffer da janela para 256x224 para o Android fazer o upscale via Hardware
+          const int SNES_WIDTH = 256;
+          const int SNES_HEIGHT = 224;
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_initNative(JNIEnv* env, jobject) {
+              g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
+              g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
+              __android_log_print(ANDROID_LOG_INFO, "ComSquare", "Core Initialized");
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_loadRomNative(JNIEnv* env, jobject, jstring path) {
+              const char *nativePath = env->GetStringUTFChars(path, 0);
+              if (g_snes) {
+                  try {
+                      g_snes->loadRom(std::string(nativePath));
+                  } catch (...) {}
+              }
+              env->ReleaseStringUTFChars(path, nativePath);
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_setSurface(JNIEnv* env, jobject, jobject surface) {
+              // Se já existe uma janela, libera
+              if (g_window) {
+                  ANativeWindow_release(g_window);
+                  g_window = nullptr;
+              }
+
+              // Se uma nova superfície foi passada, configura
+              if (surface) {
+                  g_window = ANativeWindow_fromSurface(env, surface);
+                  // Define o tamanho do buffer interno. O Android estica isso para o tamanho da tela.
+                  // Isso é muito mais rápido do que fazer scaling via software.
+                  ANativeWindow_setBuffersGeometry(g_window, 1024, 1024, WINDOW_FORMAT_RGBA_8888);
+              }
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_runFrame(JNIEnv* env, jobject) {
+              if (!g_snes || !g_renderer) return;
+
+              // 1. Atualiza Lógica do Emulador
+              try { 
+                  g_snes->update(); 
+              } catch(...) { return; }
+
+              // 2. Renderização Direta (Sem JNI Bitmap Copy)
+              if (g_window) {
+                  ANativeWindow_Buffer buffer;
+                  if (ANativeWindow_lock(g_window, &buffer, nullptr) == 0) {
+                      
+                      const uint32_t* src = g_renderer->getPixels();
+                      uint32_t* dst = (uint32_t*)buffer.bits;
+                      
+                      // Copia linha a linha considerando o stride (largura real da memória)
+                      // O PPU original desenha em um buffer de 1024x1024
+                      // Como definimos a geometria da janela para 1024x1024, podemos copiar direto.
+                      
+                      // Otimização: Copia apenas a área relevante se possível, 
+                      // mas aqui vamos copiar o buffer todo para garantir que funcione primeiro.
+                      // src size = 1024 * 1024
+                      
+                      // Cuidado: buffer.stride pode ser maior que width
+                      int lineSize = 1024 * 4; // 1024 pixels * 4 bytes
+                      for (int i = 0; i < 1024; ++i) {
+                          memcpy(dst + (i * buffer.stride), src + (i * 1024), lineSize);
+                      }
+
+                      ANativeWindow_unlockAndPost(g_window);
+                  }
+              }
+          }
+          EOF
+
+      # 3. Limpa MainActivity (Remove Canvas, Remove Bitmap, Adiciona setSurface)
       - name: Overwrite MainActivity.kt
         run: |
           cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
           package com.comsquare.emulator
 
-          import android.graphics.Bitmap
-          import android.graphics.Canvas
           import android.graphics.Color
-          import android.graphics.PixelFormat
-          import android.graphics.Rect
           import android.net.Uri
           import android.os.Bundle
+          import android.view.Surface
           import android.view.SurfaceHolder
           import android.view.SurfaceView
           import android.view.View
@@ -91,14 +170,8 @@ jobs:
               private lateinit var btnLoadRom: Button
               
               private var emulatorJob: Job? = null
-              private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
-              
               @Volatile private var isRunning = false
-              @Volatile private var isSurfaceValid = false
               
-              private val renderDst = Rect()
-              private val renderSrc = Rect(0, 0, 256, 224)
-
               private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
                   uri?.let { loadGameFromUri(it) }
               }
@@ -111,12 +184,7 @@ jobs:
                   tvStatus = findViewById(R.id.tvStatus)
                   btnLoadRom = findViewById(R.id.btnLoadRom)
 
-                  // Carrega biblioteca C++
                   initNative()
-
-                  // Configura transparência e formato para evitar bugs visuais
-                  surfaceView.setZOrderOnTop(false) 
-                  surfaceView.holder.setFormat(PixelFormat.RGBA_8888)
 
                   btnLoadRom.setOnClickListener {
                       filePickerLauncher.launch(arrayOf("*/*"))
@@ -124,17 +192,18 @@ jobs:
 
                   surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
                       override fun surfaceCreated(holder: SurfaceHolder) {
-                          isSurfaceValid = true
-                          if (isRunning) startEmulatorLoop(holder)
+                          // Passa a superfície nativa para o C++
+                          setSurface(holder.surface)
+                          if (isRunning) startEmulatorLoop()
                       }
 
                       override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                          renderDst.set(0, 0, width, height)
+                          // C++ gerencia a escala automaticamente via ANativeWindow_setBuffersGeometry
                       }
 
                       override fun surfaceDestroyed(holder: SurfaceHolder) {
-                          isSurfaceValid = false
-                          // Não cancelamos o job aqui para não perder o estado do emulador, apenas paramos o desenho
+                          // Avisa o C++ que a superfície morreu
+                          setSurface(null)
                       }
                   })
               }
@@ -144,55 +213,37 @@ jobs:
                       val inputStream = contentResolver.openInputStream(uri)
                       val tempFile = File(cacheDir, "game.sfc")
                       val outputStream = FileOutputStream(tempFile)
-                      
                       inputStream?.copyTo(outputStream)
                       inputStream?.close()
                       outputStream.close()
 
                       loadRomNative(tempFile.absolutePath)
                       
-                      // UI Update
                       tvStatus.visibility = View.GONE
                       btnLoadRom.visibility = View.GONE
-                      
                       isRunning = true
-                      if (isSurfaceValid) startEmulatorLoop(surfaceView.holder)
                       
-                      Toast.makeText(this, "Game Loaded!", Toast.LENGTH_SHORT).show()
+                      // Inicia o loop se a superfície já estiver pronta (ou espera o callback)
+                      if (surfaceView.holder.surface.isValid) {
+                          setSurface(surfaceView.holder.surface)
+                          startEmulatorLoop()
+                      }
                       
                   } catch (e: Exception) {
                       tvStatus.text = "Error: \${e.message}"
-                      tvStatus.setTextColor(Color.RED)
                   }
               }
 
-              private fun startEmulatorLoop(holder: SurfaceHolder) {
+              private fun startEmulatorLoop() {
                   emulatorJob?.cancel()
-                  
                   emulatorJob = CoroutineScope(Dispatchers.Default).launch {
                       while (isActive && isRunning) {
-                          val startTime = System.currentTimeMillis()
+                          val start = System.currentTimeMillis()
                           
-                          // 1. C++ Core Update
-                          updateFrame()
+                          // Toda a mágica acontece no C++ agora (Update + Render)
+                          runFrame()
                           
-                          // 2. Render Check
-                          if (isSurfaceValid && holder.surface.isValid) {
-                              try {
-                                  // Lock Canvas (Kotlin warning fixed: direct assignment)
-                                  val canvas = holder.lockCanvas()
-                                  if (canvas != null) {
-                                      canvas.drawColor(Color.BLACK)
-                                      canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
-                                      holder.unlockCanvasAndPost(canvas)
-                                  }
-                              } catch (e: Exception) {
-                                  // Ignora erros de surface perdida durante rotação
-                              }
-                          }
-
-                          // 3. FPS Limiter (~60 FPS)
-                          val diff = System.currentTimeMillis() - startTime
+                          val diff = System.currentTimeMillis() - start
                           if (diff < 16) delay(16 - diff)
                       }
                   }
@@ -200,8 +251,8 @@ jobs:
 
               external fun initNative()
               external fun loadRomNative(path: String)
-              external fun updateFrame()
-              external fun renderToBitmap(bitmap: Bitmap)
+              external fun setSurface(surface: Surface?) // Novo método: Passa o Surface direto
+              external fun runFrame() // Antigo updateFrame, agora faz tudo
 
               companion object {
                   init { System.loadLibrary("comsquare") }
@@ -213,7 +264,8 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/res/layout/activity_main.xml
+          git add app/src/main/cpp/CMakeLists.txt
+          git add app/src/main/cpp/native-lib.cpp
           git add app/src/main/java/com/comsquare/emulator/MainActivity.kt
-          git commit -m "UI Fix: Visible Load Button and safer SurfaceView loop"
+          git commit -m "Refactor: Move rendering logic to C++ using ANativeWindow"
           git push
