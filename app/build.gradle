@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+android {
+    compileSdkVersion 33
+    defaultConfig {
+        applicationId "com.comsquare.emulator"
+        minSdkVersion 24
+        targetSdkVersion 33
+        versionCode 1
+        versionName "1.0"
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++20"
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
+    }
+    namespace 'com.comsquare.emulator'
+}
+dependencies {
+    implementation 'androidx.core:core-ktx:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
+}
