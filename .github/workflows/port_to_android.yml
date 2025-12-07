@@ -1,4 +1,4 @@
-name: Fix SDL MainActivity Logic
+name: Fix Missing SDL2 Directory
 
 on:
   workflow_dispatch:
@@ -7,111 +7,46 @@ permissions:
   contents: write
 
 jobs:
-  fix-kotlin:
+  download-and-commit-sdl:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Rewrite MainActivity.kt with Legacy Intent API
+      - name: Download SDL2 Source
         run: |
-          cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
-          package com.comsquare.emulator
+          # Entra na pasta cpp
+          cd app/src/main/cpp
+          
+          # Remove qualquer resquício anterior para evitar duplicidade
+          rm -rf SDL2
+          
+          # Baixa a versão estável do SDL2
+          echo "Baixando SDL2..."
+          wget https://github.com/libsdl-org/SDL/releases/download/release-2.28.5/SDL2-2.28.5.zip -O sdl2.zip
+          
+          # Descompacta
+          echo "Extraindo..."
+          unzip -q sdl2.zip
+          
+          # Renomeia a pasta de 'SDL2-2.28.5' para apenas 'SDL2' (que é o que o CMake procura)
+          mv SDL2-2.28.5 SDL2
+          
+          # Limpa o zip
+          rm sdl2.zip
+          
+          # Remove pastas desnecessárias do SDL para economizar espaço (opcional, mas recomendado)
+          rm -rf SDL2/docs SDL2/test SDL2/VisualC
+          
+          echo "SDL2 instalado em app/src/main/cpp/SDL2"
 
-          import org.libsdl.app.SDLActivity
-          import android.os.Bundle
-          import android.widget.Button
-          import android.widget.FrameLayout
-          import android.view.Gravity
-          import android.view.View
-          import java.io.File
-          import java.io.FileOutputStream
-          import android.net.Uri
-          import android.graphics.Color
-          import android.content.Intent
-          import android.app.Activity
-
-          class MainActivity : SDLActivity() {
-
-              // Código de requisição para identificar o retorno do seletor de arquivos
-              private val PICK_ROM_CODE = 123
-
-              override fun getLibraries(): Array<String> {
-                  return arrayOf("comsquare")
-              }
-
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  
-                  // Botão Flutuante (Overlay)
-                  val loadButton = Button(this)
-                  loadButton.text = "LOAD ROM"
-                  loadButton.setBackgroundColor(Color.WHITE)
-                  loadButton.setTextColor(Color.BLACK)
-                  loadButton.setPadding(50, 20, 50, 20)
-                  
-                  val params = FrameLayout.LayoutParams(
-                      FrameLayout.LayoutParams.WRAP_CONTENT,
-                      FrameLayout.LayoutParams.WRAP_CONTENT
-                  )
-                  params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                  params.topMargin = 150 // Margem para não ficar em cima da status bar
-                  
-                  addContentView(loadButton, params)
-
-                  loadButton.setOnClickListener {
-                      // Usa a API clássica de Intent, compatível com SDLActivity
-                      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                          addCategory(Intent.CATEGORY_OPENABLE)
-                          type = "*/*" // Pode filtrar por arquivos específicos se quiser
-                      }
-                      startActivityForResult(intent, PICK_ROM_CODE)
-                  }
-                  
-                  loadButton.tag = "btnLoad"
-              }
-
-              // Captura o resultado da seleção do arquivo
-              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-                  super.onActivityResult(requestCode, resultCode, data)
-                  
-                  if (requestCode == PICK_ROM_CODE && resultCode == Activity.RESULT_OK) {
-                      data?.data?.let { uri ->
-                          loadGameFromUri(uri)
-                      }
-                  }
-              }
-
-              private fun loadGameFromUri(uri: Uri) {
-                  try {
-                      val inputStream = contentResolver.openInputStream(uri)
-                      val tempFile = File(cacheDir, "game.sfc")
-                      val outputStream = FileOutputStream(tempFile)
-                      
-                      inputStream?.copyTo(outputStream)
-                      inputStream?.close()
-                      outputStream.close()
-
-                      // Passa o caminho absoluto para o C++
-                      loadRomNative(tempFile.absolutePath)
-                      
-                      // Esconde o botão após carregar
-                      val btn = window.decorView.findViewWithTag<Button>("btnLoad")
-                      btn?.visibility = View.GONE
-                      
-                  } catch (e: Exception) {
-                      e.printStackTrace()
-                  }
-              }
-
-              external fun loadRomNative(path: String)
-          }
-          EOF
-
-      - name: Commit and Push changes
+      - name: Commit SDL2 to Repository
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/java/com/comsquare/emulator/MainActivity.kt
-          git commit -m "Fix: Replace registerForActivityResult with startActivityForResult for SDL compatibility"
+          
+          # Força a adição da pasta SDL2 ao git
+          git add -f app/src/main/cpp/SDL2
+          
+          git commit -m "Fix: Add SDL2 source code permanently to repository"
           git push
