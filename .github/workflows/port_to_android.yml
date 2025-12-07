@@ -1,4 +1,4 @@
-name: Fix Missing SDL Java Classes
+name: Switch to Pure SDL (No Java UI)
 
 on:
   workflow_dispatch:
@@ -7,26 +7,135 @@ permissions:
   contents: write
 
 jobs:
-  fix-java-files:
+  pure-sdl:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Copia TODOS os arquivos .java do diretório do SDL2 para o pacote do aplicativo
-      # Isso garante que SDLSurface.java e outros helpers sejam incluídos
-      - name: Copy missing SDL Java files
+      # 1. Limpa MainActivity.kt para ser um wrapper SDL puro
+      - name: Reset MainActivity.kt
         run: |
-          echo "Copiando arquivos Java do SDL2..."
-          cp app/src/main/cpp/SDL2/android-project/app/src/main/java/org/libsdl/app/*.java app/src/main/java/org/libsdl/app/
+          cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
+          package com.comsquare.emulator
+          import org.libsdl.app.SDLActivity
+          class MainActivity : SDLActivity() {
+              override fun getLibraries(): Array<String> {
+                  return arrayOf("comsquare")
+              }
+          }
+          EOF
+
+      # 2. Deleta o layout XML conflitante
+      - name: Remove XML Layout
+        run: rm -f app/src/main/res/layout/activity_main.xml
+
+      # 3. Reescreve native-lib.cpp para desenhar algo VISÍVEL imediatamente
+      - name: Overwrite native-lib.cpp
+        run: |
+          cat <<EOF > app/src/main/cpp/native-lib.cpp
+          #include <jni.h>
+          #include <string>
+          #include <memory>
+          #include <android/log.h>
+          #include <SDL.h>
+          #include <SDL_main.h>
+
+          #include "SNES.hpp"
+          #include "AndroidRenderer.hpp"
+
+          // Log tag
+          #define LOG_TAG "ComSquare"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+          std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
+          std::unique_ptr<ComSquare::SNES> g_snes;
+
+          int main(int argc, char* argv[]) {
+              LOGI("Iniciando SDL Main...");
+
+              if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+                  LOGE("SDL_Init failed: %s", SDL_GetError());
+                  return 1;
+              }
+
+              // Cria janela SDL
+              SDL_Window* window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
+              if (!window) {
+                  LOGE("Failed to create window: %s", SDL_GetError());
+                  return 1;
+              }
+
+              SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+              if (!renderer) {
+                   LOGE("Failed to create renderer: %s", SDL_GetError());
+                   return 1;
+              }
+
+              // Tenta iniciar o SNES
+              g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
+              // Hack: Injeta os ponteiros do SDL no nosso renderer customizado
+              g_renderer->window = window;
+              g_renderer->renderer = renderer;
+              g_renderer->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 1024, 1024);
+
+              g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
+
+              // Tenta carregar uma ROM hardcoded (coloque o arquivo em /sdcard/Download/game.sfc para testar depois)
+              // Ou apenas desenha uma cor para teste
+              bool romLoaded = false;
+              /* 
+              try {
+                  g_snes->loadRom("/sdcard/Download/game.sfc"); // Caminho de teste
+                  romLoaded = true;
+              } catch (...) {} 
+              */
+
+              bool running = true;
+              SDL_Event event;
+              int color = 0;
+
+              while (running) {
+                  while (SDL_PollEvent(&event)) {
+                      if (event.type == SDL_QUIT || event.type == SDL_APP_TERMINATING) {
+                          running = false;
+                      }
+                      // Toque na tela fecha ou faz algo
+                      if (event.type == SDL_FINGERDOWN) {
+                           LOGI("Touch detected!");
+                      }
+                  }
+
+                  if (romLoaded) {
+                      try {
+                          g_snes->update();
+                          // O update chama drawScreen() do renderer
+                      } catch (...) {}
+                  } else {
+                      // MODO DE DEBUG VISUAL:
+                      // Se não tem ROM, pisca a tela para provar que o vídeo funciona
+                      color = (color + 5) % 255;
+                      SDL_SetRenderDrawColor(renderer, color, 0, 0, 255); // Vermelho pulsante
+                      SDL_RenderClear(renderer);
+                      SDL_RenderPresent(renderer);
+                  }
+                  
+                  // Limita FPS tosco
+                  SDL_Delay(16);
+              }
+
+              SDL_Quit();
+              return 0;
+          }
+          EOF
 
       - name: Commit and Push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
-          # Adiciona os novos arquivos copiados
-          git add app/src/main/java/org/libsdl/app/*.java
-          
-          git commit -m "Fix: Add missing SDLSurface.java and other helpers"
+          git add app/src/main/java/com/comsquare/emulator/MainActivity.kt
+          git rm app/src/main/res/layout/activity_main.xml
+          git add app/src/main/cpp/native-lib.cpp
+          git commit -m "Refactor: Pure SDL implementation to debug rendering issues"
           git push
