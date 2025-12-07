@@ -366,7 +366,7 @@ namespace ComSquare::APU
 		int MOV(uint24_t memFrom, uint24_t memTo);
 	public:
 		explicit APU(Renderer::IRenderer &renderer);
-		APU(const APU &) = default;
+		APU(const APU &) = delete;
 		APU &operator=(const APU &) = delete;
 		~APU() override = default;
 

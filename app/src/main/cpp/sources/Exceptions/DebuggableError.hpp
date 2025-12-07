@@ -1,12 +1,8 @@
-//
-// Created by anonymus-raccoon on 3/26/20.
-//
-
 #pragma once
 
-#include <bits/exception.h>
+#include <exception>
 
 namespace ComSquare
 {
-	class DebuggableError : public std::exception {};
+    class DebuggableError : public std::exception {};
 }
