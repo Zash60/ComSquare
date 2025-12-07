@@ -1,64 +1,54 @@
 package com.comsquare.emulator
 
-import android.graphics.Color
-import android.net.Uri
+import org.libsdl.app.SDLActivity
 import android.os.Bundle
-import android.view.Surface
-import android.view.SurfaceHolder
-import android.view.SurfaceView
-import android.view.View
 import android.widget.Button
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.FrameLayout
+import android.view.Gravity
+import android.view.View
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
+import android.net.Uri
+import android.graphics.Color
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : SDLActivity() {
 
-    private lateinit var surfaceView: SurfaceView
-    private lateinit var tvStatus: TextView
-    private lateinit var btnLoadRom: Button
-    
-    private var emulatorJob: Job? = null
-    @Volatile private var isRunning = false
-    
+    // Nome da biblioteca definida no CMake
+    override fun getLibraries(): Array<String> {
+        return arrayOf("comsquare")
+    }
+
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         uri?.let { loadGameFromUri(it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        
+        // SDLActivity cria seu próprio layout. Vamos adicionar um botão por cima.
+        val loadButton = Button(this)
+        loadButton.text = "LOAD ROM"
+        loadButton.setBackgroundColor(Color.WHITE)
+        loadButton.setTextColor(Color.BLACK)
+        loadButton.setPadding(50, 20, 50, 20)
+        
+        val params = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        )
+        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        params.topMargin = 100
+        
+        // O layout principal do SDL é um FrameLayout (mLayout)
+        addContentView(loadButton, params)
 
-        surfaceView = findViewById(R.id.emulatorSurface)
-        tvStatus = findViewById(R.id.tvStatus)
-        btnLoadRom = findViewById(R.id.btnLoadRom)
-
-        initNative()
-
-        btnLoadRom.setOnClickListener {
+        loadButton.setOnClickListener {
             filePickerLauncher.launch(arrayOf("*/*"))
         }
-
-        surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                // Passa a superfície nativa para o C++
-                setSurface(holder.surface)
-                if (isRunning) startEmulatorLoop()
-            }
-
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                // C++ gerencia a escala automaticamente via ANativeWindow_setBuffersGeometry
-            }
-
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                // Avisa o C++ que a superfície morreu
-                setSurface(null)
-            }
-        })
+        
+        // Salva referência para esconder depois
+        loadButton.tag = "btnLoad"
     }
 
     private fun loadGameFromUri(uri: Uri) {
@@ -66,48 +56,23 @@ class MainActivity : AppCompatActivity() {
             val inputStream = contentResolver.openInputStream(uri)
             val tempFile = File(cacheDir, "game.sfc")
             val outputStream = FileOutputStream(tempFile)
+            
             inputStream?.copyTo(outputStream)
             inputStream?.close()
             outputStream.close()
 
+            // Passa o caminho para o C++
             loadRomNative(tempFile.absolutePath)
             
-            tvStatus.visibility = View.GONE
-            btnLoadRom.visibility = View.GONE
-            isRunning = true
-            
-            // Inicia o loop se a superfície já estiver pronta (ou espera o callback)
-            if (surfaceView.holder.surface.isValid) {
-                setSurface(surfaceView.holder.surface)
-                startEmulatorLoop()
-            }
+            // Esconde o botão (encontra pela tag ou guarda referência)
+            val btn = window.decorView.findViewWithTag<Button>("btnLoad")
+            btn?.visibility = View.GONE
             
         } catch (e: Exception) {
-            tvStatus.text = "Error: ${e.message}"
+            e.printStackTrace()
         }
     }
 
-    private fun startEmulatorLoop() {
-        emulatorJob?.cancel()
-        emulatorJob = CoroutineScope(Dispatchers.Default).launch {
-            while (isActive && isRunning) {
-                val start = System.currentTimeMillis()
-                
-                // Toda a mágica acontece no C++ agora (Update + Render)
-                runFrame()
-                
-                val diff = System.currentTimeMillis() - start
-                if (diff < 16) delay(16 - diff)
-            }
-        }
-    }
-
-    external fun initNative()
+    // Função JNI implementada no native-lib.cpp
     external fun loadRomNative(path: String)
-    external fun setSurface(surface: Surface?) // Novo método: Passa o Surface direto
-    external fun runFrame() // Antigo updateFrame, agora faz tudo
-
-    companion object {
-        init { System.loadLibrary("comsquare") }
-    }
 }
