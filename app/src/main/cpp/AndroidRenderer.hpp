@@ -4,6 +4,7 @@
 #include <SDL.h>
 #include <vector>
 #include <android/log.h>
+#include <span>
 
 namespace ComSquare::Renderer {
 
@@ -24,10 +25,16 @@ namespace ComSquare::Renderer {
 
         void initSDL() {
             // SDL já foi iniciado no main, aqui pegamos a janela se necessário ou criamos recursos
+            // No Android, a janela é criada automaticamente pelo SDL_Init
+            // Criamos apenas o renderer e a textura aqui
+            
+            // Usa a janela principal do SDL
             window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
             renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            
             // Textura para o buffer do SNES (Streaming para atualização constante)
-            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_STREAMING, BUFFER_WIDTH, BUFFER_HEIGHT);
+            // ABGR8888 é geralmente o formato nativo mais rápido em GPUs Android (GLES)
+            texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, BUFFER_WIDTH, BUFFER_HEIGHT);
             
             // Limpa a tela
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -38,27 +45,16 @@ namespace ComSquare::Renderer {
         void setWindowName(std::string &name) override {}
 
         void drawScreen() override {
-            if (!renderer || !texture) return;
-
-            // Atualiza a textura com os pixels do buffer
-            SDL_UpdateTexture(texture, nullptr, pixelBuffer.data(), BUFFER_WIDTH * sizeof(uint32_t));
-            
-            // Limpa
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-            
-            // Desenha a textura esticada na tela (mantendo aspecto se possível, aqui estica tudo)
-            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-            
-            // Mostra
-            SDL_RenderPresent(renderer);
+            // O desenho real é feito no loop principal do SDL (native-lib.cpp)
+            // Este método é chamado pelo SNES::update().
+            // Não fazemos o SDL_RenderPresent aqui para não bloquear a thread de emulação.
         }
 
         void putPixel(unsigned y, unsigned x, uint32_t rgba) override {
             if (x < BUFFER_WIDTH && y < BUFFER_HEIGHT) {
-                // RGBA8888 no SDL vs uint32 do core. Pode precisar de ajuste de endianness (ABGR vs ARGB)
-                // O Core geralmente manda 0xRRGGBBAA ou similar. 
-                // Vamos assumir compatibilidade direta por enquanto.
+                // O SNES envia pixels no formato 0xAABBGGRR (little endian uint32) ou similar.
+                // Precisamos garantir que bata com a textura SDL (ABGR8888).
+                // Se as cores ficarem invertidas (Vermelho <-> Azul), trocamos aqui ou na criação da textura.
                 pixelBuffer[y * BUFFER_WIDTH + x] = rgba;
             }
         }
@@ -69,6 +65,11 @@ namespace ComSquare::Renderer {
 
         void playAudio(std::span<int16_t> samples) override {
             // Stub (SDL Audio pode ser adicionado aqui depois)
+        }
+        
+        // Helper para o loop principal acessar os dados brutos
+        const void* getPixels() const {
+            return pixelBuffer.data();
         }
     };
 }
