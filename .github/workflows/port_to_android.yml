@@ -1,4 +1,4 @@
-name: Fix Android Compilation Issues
+name: Fix SFML Vector2 Dependency
 
 on:
   workflow_dispatch:
@@ -7,55 +7,129 @@ permissions:
   contents: write
 
 jobs:
-  fix-codebase:
+  fix-code:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 1. CORREÇÃO DE RECURSOS: Cria o ícone ic_launcher.xml
-      - name: Create Launcher Icon
+      - name: Rewrite Vector2.hpp without SFML
         run: |
-          mkdir -p app/src/main/res/mipmap
-          cat <<EOF > app/src/main/res/mipmap/ic_launcher.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path android:fillColor="#3DDC84" android:pathData="M0,0h108v108h-108z"/>
-              <path android:fillColor="#FFFFFF" android:pathData="M54,54m-20,0a20,20 0 1,1 40,0a20,20 0 1,1 -40,0"/>
-          </vector>
-          EOF
-
-      # 2. CORREÇÃO C++: Substitui <bits/exception.h> por <exception>
-      # O header 'bits/exception.h' é interno do GCC Linux e não existe no Android NDK (Clang).
-      - name: Fix DebuggableError.hpp
-        run: |
-          cat <<EOF > app/src/main/cpp/sources/Exceptions/DebuggableError.hpp
+          # Sobrescreve o arquivo Vector2.hpp com uma versão pura C++
+          cat <<EOF > app/src/main/cpp/sources/Models/Vector2.hpp
           #pragma once
-          
-          #include <exception>
-          
+
+          #include <ostream>
+
           namespace ComSquare
           {
-              class DebuggableError : public std::exception {};
+              template<typename T>
+              class Vector2
+              {
+              public:
+                  T x;
+                  T y;
+
+                  Vector2() : x(0), y(0) {}
+
+                  Vector2(T _x, T _y) : x(_x), y(_y) {}
+
+                  // Construtor SFML removido para compatibilidade com Android
+
+                  template<typename T2>
+                  Vector2<T> &operator+=(const Vector2<T2> &vec)
+                  {
+                      this->x += vec.x;
+                      this->y += vec.y;
+                      return *this;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator+(const Vector2<T2> &vec) const
+                  {
+                      return Vector2<T>(this->x + vec.x, this->y + vec.y);
+                  }
+
+                  template<typename T2>
+                  Vector2<T> &operator-=(const Vector2<T2> &vec)
+                  {
+                      this->x -= vec.x;
+                      this->y -= vec.y;
+                      return *this;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator-(const Vector2<T2> &vec) const
+                  {
+                      return Vector2<T>(this->x - vec.x, this->y - vec.y);
+                  }
+
+                  template<typename T2>
+                  Vector2<T> &operator*=(T2 d)
+                  {
+                      this->x *= d;
+                      this->y *= d;
+                      return *this;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator*(T2 d) const
+                  {
+                      return Vector2<T>(this->x * d, this->y * d);
+                  }
+
+                  template<typename T2>
+                  T operator*(Vector2<T> &b) const
+                  {
+                      return this->x * b.x + this->y * b.y;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator/=(Vector2<T2> &b)
+                  {
+                      this->x /= b.x;
+                      this->y /= b.y;
+                      return this;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator/(Vector2<T2> &b) const
+                  {
+                      return Vector2<T>(this->x / b.x, this->y / b.y);
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator/=(T2 b)
+                  {
+                      this->x /= b;
+                      this->y /= b;
+                      return this;
+                  }
+
+                  template<typename T2>
+                  Vector2<T> operator/(T2 b) const
+                  {
+                      return Vector2<T>(this->x / b, this->y / b);
+                  }
+              };
+
+              typedef Vector2<float> Vector2f;
+              typedef Vector2<unsigned> Vector2u;
+              typedef Vector2<int> Vector2i;
+          }
+
+          template<typename T>
+          std::ostream &operator<<(std::ostream &s, const ComSquare::Vector2<T> &v)
+          {
+              s << v.x << " " << v.y;
+              return s;
           }
           EOF
 
-      # 3. CORREÇÃO C++: Corrige Construtor de Cópia da APU
-      # Muda "APU(const APU &) = default;" para "= delete;" pois a classe contém membros não copiáveis.
-      - name: Fix APU.hpp Copy Constructor
-        run: |
-          sed -i 's/APU(const APU &) = default;/APU(const APU \&) = delete;/g' app/src/main/cpp/sources/APU/APU.hpp
-
-      - name: Commit and Push Fixes
+      - name: Commit and Push changes
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/res/mipmap/ic_launcher.xml
-          git add app/src/main/cpp/sources/Exceptions/DebuggableError.hpp
-          git add app/src/main/cpp/sources/APU/APU.hpp
-          git commit -m "Fix: Android build errors (missing icon, invalid header, copy constructor)" || echo "No changes to commit"
+          git add app/src/main/cpp/sources/Models/Vector2.hpp
+          git commit -m "Fix: Remove SFML dependency from Vector2.hpp for Android build"
           git push
