@@ -1,12 +1,9 @@
 package com.comsquare.emulator
 
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.PixelFormat
-import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -26,14 +23,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLoadRom: Button
     
     private var emulatorJob: Job? = null
-    private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
-    
     @Volatile private var isRunning = false
-    @Volatile private var isSurfaceValid = false
     
-    private val renderDst = Rect()
-    private val renderSrc = Rect(0, 0, 256, 224)
-
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         uri?.let { loadGameFromUri(it) }
     }
@@ -46,12 +37,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnLoadRom = findViewById(R.id.btnLoadRom)
 
-        // Carrega biblioteca C++
         initNative()
-
-        // Configura transparência e formato para evitar bugs visuais
-        surfaceView.setZOrderOnTop(false) 
-        surfaceView.holder.setFormat(PixelFormat.RGBA_8888)
 
         btnLoadRom.setOnClickListener {
             filePickerLauncher.launch(arrayOf("*/*"))
@@ -59,17 +45,18 @@ class MainActivity : AppCompatActivity() {
 
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                isSurfaceValid = true
-                if (isRunning) startEmulatorLoop(holder)
+                // Passa a superfície nativa para o C++
+                setSurface(holder.surface)
+                if (isRunning) startEmulatorLoop()
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                renderDst.set(0, 0, width, height)
+                // C++ gerencia a escala automaticamente via ANativeWindow_setBuffersGeometry
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                isSurfaceValid = false
-                // Não cancelamos o job aqui para não perder o estado do emulador, apenas paramos o desenho
+                // Avisa o C++ que a superfície morreu
+                setSurface(null)
             }
         })
     }
@@ -79,55 +66,37 @@ class MainActivity : AppCompatActivity() {
             val inputStream = contentResolver.openInputStream(uri)
             val tempFile = File(cacheDir, "game.sfc")
             val outputStream = FileOutputStream(tempFile)
-            
             inputStream?.copyTo(outputStream)
             inputStream?.close()
             outputStream.close()
 
             loadRomNative(tempFile.absolutePath)
             
-            // UI Update
             tvStatus.visibility = View.GONE
             btnLoadRom.visibility = View.GONE
-            
             isRunning = true
-            if (isSurfaceValid) startEmulatorLoop(surfaceView.holder)
             
-            Toast.makeText(this, "Game Loaded!", Toast.LENGTH_SHORT).show()
+            // Inicia o loop se a superfície já estiver pronta (ou espera o callback)
+            if (surfaceView.holder.surface.isValid) {
+                setSurface(surfaceView.holder.surface)
+                startEmulatorLoop()
+            }
             
         } catch (e: Exception) {
             tvStatus.text = "Error: ${e.message}"
-            tvStatus.setTextColor(Color.RED)
         }
     }
 
-    private fun startEmulatorLoop(holder: SurfaceHolder) {
+    private fun startEmulatorLoop() {
         emulatorJob?.cancel()
-        
         emulatorJob = CoroutineScope(Dispatchers.Default).launch {
             while (isActive && isRunning) {
-                val startTime = System.currentTimeMillis()
+                val start = System.currentTimeMillis()
                 
-                // 1. C++ Core Update
-                updateFrame()
+                // Toda a mágica acontece no C++ agora (Update + Render)
+                runFrame()
                 
-                // 2. Render Check
-                if (isSurfaceValid && holder.surface.isValid) {
-                    try {
-                        // Lock Canvas (Kotlin warning fixed: direct assignment)
-                        val canvas = holder.lockCanvas()
-                        if (canvas != null) {
-                            canvas.drawColor(Color.BLACK)
-                            canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
-                            holder.unlockCanvasAndPost(canvas)
-                        }
-                    } catch (e: Exception) {
-                        // Ignora erros de surface perdida durante rotação
-                    }
-                }
-
-                // 3. FPS Limiter (~60 FPS)
-                val diff = System.currentTimeMillis() - startTime
+                val diff = System.currentTimeMillis() - start
                 if (diff < 16) delay(16 - diff)
             }
         }
@@ -135,8 +104,8 @@ class MainActivity : AppCompatActivity() {
 
     external fun initNative()
     external fun loadRomNative(path: String)
-    external fun updateFrame()
-    external fun renderToBitmap(bitmap: Bitmap)
+    external fun setSurface(surface: Surface?) // Novo método: Passa o Surface direto
+    external fun runFrame() // Antigo updateFrame, agora faz tudo
 
     companion object {
         init { System.loadLibrary("comsquare") }
