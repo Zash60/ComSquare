@@ -1,7 +1,5 @@
 package com.comsquare.emulator
 
-import android.app.Activity
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -30,11 +28,8 @@ class MainActivity : AppCompatActivity() {
     private var emulatorJob: Job? = null
     private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
     
-    // Controle de estado volátil para threads
-    @Volatile
-    private var isRunning = false
-    @Volatile
-    private var isSurfaceReady = false
+    @Volatile private var isRunning = false
+    @Volatile private var isSurfaceValid = false
     
     private val renderDst = Rect()
     private val renderSrc = Rect(0, 0, 256, 224)
@@ -51,7 +46,12 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnLoadRom = findViewById(R.id.btnLoadRom)
 
+        // Carrega biblioteca C++
         initNative()
+
+        // Configura transparência e formato para evitar bugs visuais
+        surfaceView.setZOrderOnTop(false) 
+        surfaceView.holder.setFormat(PixelFormat.RGBA_8888)
 
         btnLoadRom.setOnClickListener {
             filePickerLauncher.launch(arrayOf("*/*"))
@@ -59,12 +59,8 @@ class MainActivity : AppCompatActivity() {
 
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                // Define o formato de pixel para evitar avisos do HWUI
-                holder.setFormat(PixelFormat.RGBA_8888)
-                isSurfaceReady = true
-                if (isRunning) {
-                    startEmulatorLoop(holder)
-                }
+                isSurfaceValid = true
+                if (isRunning) startEmulatorLoop(holder)
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -72,9 +68,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                isSurfaceReady = false
-                // Não cancelamos o job aqui para não matar o estado do emulador ao rotacionar,
-                // apenas paramos de desenhar. O loop checa isSurfaceReady.
+                isSurfaceValid = false
+                // Não cancelamos o job aqui para não perder o estado do emulador, apenas paramos o desenho
             }
         })
     }
@@ -91,20 +86,18 @@ class MainActivity : AppCompatActivity() {
 
             loadRomNative(tempFile.absolutePath)
             
+            // UI Update
             tvStatus.visibility = View.GONE
             btnLoadRom.visibility = View.GONE
             
             isRunning = true
-            // Se a superfície já existe, inicia. Se não, o callback surfaceCreated iniciará.
-            if (isSurfaceReady) {
-                startEmulatorLoop(surfaceView.holder)
-            }
+            if (isSurfaceValid) startEmulatorLoop(surfaceView.holder)
             
-            Toast.makeText(this, "ROM Loaded!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Game Loaded!", Toast.LENGTH_SHORT).show()
             
         } catch (e: Exception) {
             tvStatus.text = "Error: ${e.message}"
-            e.printStackTrace()
+            tvStatus.setTextColor(Color.RED)
         }
     }
 
@@ -115,32 +108,25 @@ class MainActivity : AppCompatActivity() {
             while (isActive && isRunning) {
                 val startTime = System.currentTimeMillis()
                 
-                // 1. Atualiza Core C++
+                // 1. C++ Core Update
                 updateFrame()
                 
-                // 2. Copia pixels para Bitmap
-                renderToBitmap(renderBitmap)
-                
-                // 3. Desenha na tela (BLINDADO)
-                if (isSurfaceReady) {
-                    var canvas: Canvas? = null
+                // 2. Render Check
+                if (isSurfaceValid && holder.surface.isValid) {
                     try {
-                        canvas = holder.lockCanvas()
+                        // Lock Canvas (Kotlin warning fixed: direct assignment)
+                        val canvas = holder.lockCanvas()
                         if (canvas != null) {
-                            // Limpa o fundo (ajuda com artefatos de rotação)
                             canvas.drawColor(Color.BLACK)
-                            // Desenha o jogo escalado
                             canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
                             holder.unlockCanvasAndPost(canvas)
                         }
                     } catch (e: Exception) {
-                        // Loga o erro, mas não crashta o app. 
-                        // É comum Surface falhar durante rotação/minimizar.
-                        e.printStackTrace()
+                        // Ignora erros de surface perdida durante rotação
                     }
                 }
 
-                // Limitador de FPS (~60 FPS)
+                // 3. FPS Limiter (~60 FPS)
                 val diff = System.currentTimeMillis() - startTime
                 if (diff < 16) delay(16 - diff)
             }

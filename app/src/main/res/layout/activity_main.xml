@@ -4,28 +4,36 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
-    <!-- A tela do jogo -->
     <SurfaceView
         android:id="@+id/emulatorSurface"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Botão para carregar o jogo -->
-    <Button
-        android:id="@+id/btnLoadRom"
+    <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="LOAD ROM"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="32dp" />
-        
-    <!-- Texto de status (opcional) -->
-    <TextView
-        android:id="@+id/tvStatus"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="No ROM Loaded"
-        android:textColor="#FFFFFF"
-        android:layout_gravity="center" />
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center">
 
+        <Button
+            android:id="@+id/btnLoadRom"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SELECT ROM FILE"
+            android:textSize="18sp"
+            android:padding="16dp"
+            android:backgroundTint="#FFFFFF"
+            android:textColor="#000000"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Press button to load game"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+    </LinearLayout>
 </FrameLayout>
