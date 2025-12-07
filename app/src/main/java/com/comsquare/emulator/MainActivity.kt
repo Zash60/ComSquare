@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Bundle
@@ -26,16 +28,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLoadRom: Button
     
     private var emulatorJob: Job? = null
-    // Buffer de renderização (1024x1024 para segurança, o SNES usa 256x224 ou 512x448)
     private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
-    private var isRunning = false
     
-    // Onde desenhar na tela do celular
+    // Controle de estado volátil para threads
+    @Volatile
+    private var isRunning = false
+    @Volatile
+    private var isSurfaceReady = false
+    
     private val renderDst = Rect()
-    // Área útil do SNES dentro do buffer 1024x1024
     private val renderSrc = Rect(0, 0, 256, 224)
 
-    // Seletor de Arquivos
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         uri?.let { loadGameFromUri(it) }
     }
@@ -48,32 +51,35 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnLoadRom = findViewById(R.id.btnLoadRom)
 
-        // Inicializa o C++
         initNative()
 
         btnLoadRom.setOnClickListener {
-            filePickerLauncher.launch(arrayOf("*/*")) // Aceita qualquer arquivo por enquanto
+            filePickerLauncher.launch(arrayOf("*/*"))
         }
 
         surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
-                // Loop inicia, mas só processa se tiver ROM carregada
-                startEmulatorLoop(holder)
+                // Define o formato de pixel para evitar avisos do HWUI
+                holder.setFormat(PixelFormat.RGBA_8888)
+                isSurfaceReady = true
+                if (isRunning) {
+                    startEmulatorLoop(holder)
+                }
             }
+
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                // Ajusta para manter proporção ou preencher (aqui preenche tudo)
                 renderDst.set(0, 0, width, height)
             }
+
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                isRunning = false
-                emulatorJob?.cancel()
+                isSurfaceReady = false
+                // Não cancelamos o job aqui para não matar o estado do emulador ao rotacionar,
+                // apenas paramos de desenhar. O loop checa isSurfaceReady.
             }
         })
     }
 
     private fun loadGameFromUri(uri: Uri) {
-        // O C++ precisa de um caminho de arquivo real (File Path), não um Content URI.
-        // Copiamos o arquivo para o cache do app.
         try {
             val inputStream = contentResolver.openInputStream(uri)
             val tempFile = File(cacheDir, "game.sfc")
@@ -83,12 +89,16 @@ class MainActivity : AppCompatActivity() {
             inputStream?.close()
             outputStream.close()
 
-            // Manda o C++ carregar o arquivo do cache
             loadRomNative(tempFile.absolutePath)
             
             tvStatus.visibility = View.GONE
-            btnLoadRom.visibility = View.GONE // Esconde o botão ao jogar
+            btnLoadRom.visibility = View.GONE
+            
             isRunning = true
+            // Se a superfície já existe, inicia. Se não, o callback surfaceCreated iniciará.
+            if (isSurfaceReady) {
+                startEmulatorLoop(surfaceView.holder)
+            }
             
             Toast.makeText(this, "ROM Loaded!", Toast.LENGTH_SHORT).show()
             
@@ -99,27 +109,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startEmulatorLoop(holder: SurfaceHolder) {
-        // Cancela job anterior se existir
         emulatorJob?.cancel()
-        isRunning = true // O loop roda, mas o updateFrame só faz algo se a ROM estiver carregada no C++
-
+        
         emulatorJob = CoroutineScope(Dispatchers.Default).launch {
             while (isActive && isRunning) {
                 val startTime = System.currentTimeMillis()
                 
-                // 1. Atualiza Core C++ (Se não tiver ROM, o C++ deve tratar isso ou não fazer nada)
+                // 1. Atualiza Core C++
                 updateFrame()
                 
                 // 2. Copia pixels para Bitmap
                 renderToBitmap(renderBitmap)
                 
-                // 3. Desenha na tela
-                val canvas: Canvas? = holder.lockCanvas()
-                if (canvas != null) {
-                    canvas.drawColor(android.graphics.Color.BLACK)
-                    // Desenha apenas se tivermos algo válido, ou desenha preto
-                    canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
-                    holder.unlockCanvasAndPost(canvas)
+                // 3. Desenha na tela (BLINDADO)
+                if (isSurfaceReady) {
+                    var canvas: Canvas? = null
+                    try {
+                        canvas = holder.lockCanvas()
+                        if (canvas != null) {
+                            // Limpa o fundo (ajuda com artefatos de rotação)
+                            canvas.drawColor(Color.BLACK)
+                            // Desenha o jogo escalado
+                            canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
+                            holder.unlockCanvasAndPost(canvas)
+                        }
+                    } catch (e: Exception) {
+                        // Loga o erro, mas não crashta o app. 
+                        // É comum Surface falhar durante rotação/minimizar.
+                        e.printStackTrace()
+                    }
                 }
 
                 // Limitador de FPS (~60 FPS)
@@ -129,12 +147,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Métodos nativos (JNI)
     external fun initNative()
     external fun loadRomNative(path: String)
     external fun updateFrame()
     external fun renderToBitmap(bitmap: Bitmap)
-    // external fun setButtonState(buttonId: Int, pressed: Boolean) // Para o futuro
 
     companion object {
         init { System.loadLibrary("comsquare") }
