@@ -1,0 +1,333 @@
+name: Port ComSquare to Android
+
+on:
+  workflow_dispatch: # Permite rodar manualmente pelo botão no GitHub
+
+permissions:
+  contents: write # Permissão necessária para fazer commit e push
+
+jobs:
+  convert-structure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Clean up Desktop/Qt files
+        run: |
+          echo "Removendo arquivos desnecessários para Android..."
+          rm -rf sources/Debugger
+          rm -rf sources/Renderer/QtRenderer
+          rm -f sources/Renderer/SFRenderer.cpp
+          rm -f sources/Renderer/SFRenderer.hpp
+          rm -f sources/main.cpp
+          rm -rf ui
+          rm -rf libs
+          rm -rf .github/workflows/build.yml .github/workflows/buildwin.yml .github/workflows/test.yml .github/workflows/doc.yml
+
+      - name: Create Android Directory Structure
+        run: |
+          echo "Criando estrutura de pastas Android..."
+          mkdir -p app/src/main/java/com/comsquare/emulator
+          mkdir -p app/src/main/cpp
+          mkdir -p app/src/main/res/values
+
+      - name: Generate AndroidManifest.xml
+        run: |
+          cat <<EOF > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.comsquare.emulator">
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="ComSquare SNES"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+      - name: Generate MainActivity.kt (Kotlin)
+        run: |
+          cat <<EOF > app/src/main/java/com/comsquare/emulator/MainActivity.kt
+          package com.comsquare.emulator
+
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Rect
+          import android.os.Bundle
+          import android.view.SurfaceHolder
+          import android.view.SurfaceView
+          import androidx.appcompat.app.AppCompatActivity
+          import kotlinx.coroutines.*
+          import java.io.File
+          import java.io.FileOutputStream
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var surfaceView: SurfaceView
+              private var emulatorJob: Job? = null
+              private val renderBitmap = Bitmap.createBitmap(1024, 1024, Bitmap.Config.ARGB_8888)
+              private var isRunning = false
+              private val renderSrc = Rect(0, 0, 256, 224)
+              private val renderDst = Rect()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  surfaceView = SurfaceView(this)
+                  setContentView(surfaceView)
+
+                  initNative()
+
+                  // Carrega ROM de exemplo (placeholder)
+                  // No mundo real, use um FilePicker
+                  val romPath = File(cacheDir, "game.smc").absolutePath 
+                  // loadRomNative(romPath) // Descomente quando tiver uma ROM real
+
+                  surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
+                      override fun surfaceCreated(holder: SurfaceHolder) {
+                          isRunning = true
+                          startEmulatorLoop(holder)
+                      }
+                      override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                          renderDst.set(0, 0, width, height)
+                      }
+                      override fun surfaceDestroyed(holder: SurfaceHolder) {
+                          isRunning = false
+                          emulatorJob?.cancel()
+                      }
+                  })
+              }
+
+              private fun startEmulatorLoop(holder: SurfaceHolder) {
+                  emulatorJob = CoroutineScope(Dispatchers.Default).launch {
+                      while (isActive && isRunning) {
+                          val startTime = System.currentTimeMillis()
+                          
+                          // 1. Atualiza Core C++
+                          updateFrame()
+                          
+                          // 2. Copia pixels para Bitmap
+                          renderToBitmap(renderBitmap)
+                          
+                          // 3. Desenha na tela
+                          val canvas: Canvas? = holder.lockCanvas()
+                          if (canvas != null) {
+                              canvas.drawColor(android.graphics.Color.BLACK)
+                              canvas.drawBitmap(renderBitmap, renderSrc, renderDst, null)
+                              holder.unlockCanvasAndPost(canvas)
+                          }
+
+                          val diff = System.currentTimeMillis() - startTime
+                          if (diff < 16) delay(16 - diff)
+                      }
+                  }
+              }
+
+              external fun initNative()
+              external fun loadRomNative(path: String)
+              external fun updateFrame()
+              external fun renderToBitmap(bitmap: Bitmap)
+
+              companion object {
+                  init { System.loadLibrary("comsquare") }
+              }
+          }
+          EOF
+
+      - name: Generate AndroidRenderer.hpp (C++ Header)
+        run: |
+          cat <<EOF > app/src/main/cpp/AndroidRenderer.hpp
+          #pragma once
+          #include "Renderer/IRenderer.hpp"
+          #include <vector>
+          #include <android/log.h>
+
+          namespace ComSquare::Renderer {
+              class AndroidRenderer : public IRenderer {
+              public:
+                  std::vector<uint32_t> pixelBuffer;
+                  AndroidRenderer() { pixelBuffer.resize(1024 * 1024); }
+                  
+                  void setWindowName(std::string &name) override {}
+                  void drawScreen() override {} // O loop Android controla isso
+                  
+                  void putPixel(unsigned y, unsigned x, uint32_t rgba) override {
+                      if (x < 1024 && y < 1024) {
+                          // Converte RGBA para ARGB se necessário, mas SFML e Android geralmente se entendem
+                          pixelBuffer[y * 1024 + x] = rgba;
+                      }
+                  }
+                  
+                  void createWindow(SNES &snes, int maxFPS) override {}
+                  void playAudio(std::span<int16_t> samples) override {}
+                  
+                  const uint32_t* getPixels() const { return pixelBuffer.data(); }
+              };
+          }
+          EOF
+
+      - name: Generate native-lib.cpp (JNI Bridge)
+        run: |
+          cat <<EOF > app/src/main/cpp/native-lib.cpp
+          #include <jni.h>
+          #include <string>
+          #include <memory>
+          #include <android/log.h>
+          #include <android/bitmap.h>
+          #include "SNES.hpp"
+          #include "AndroidRenderer.hpp"
+
+          std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
+          std::unique_ptr<ComSquare::SNES> g_snes;
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_initNative(JNIEnv* env, jobject) {
+              g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
+              g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_loadRomNative(JNIEnv* env, jobject, jstring path) {
+              const char *nativePath = env->GetStringUTFChars(path, 0);
+              if (g_snes) {
+                  try {
+                      g_snes->loadRom(std::string(nativePath));
+                  } catch (...) {}
+              }
+              env->ReleaseStringUTFChars(path, nativePath);
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_updateFrame(JNIEnv*, jobject) {
+              if (g_snes) { try { g_snes->update(); } catch(...) {} }
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_renderToBitmap(JNIEnv* env, jobject, jobject bitmap) {
+              if (!g_renderer) return;
+              AndroidBitmapInfo info;
+              void* pixels;
+              if (AndroidBitmap_getInfo(env, bitmap, &info) < 0) return;
+              if (AndroidBitmap_lockPixels(env, bitmap, &pixels) < 0) return;
+              memcpy(pixels, g_renderer->getPixels(), info.width * info.height * 4);
+              AndroidBitmap_unlockPixels(env, bitmap);
+          }
+          EOF
+
+      - name: Generate CMakeLists.txt
+        run: |
+          cat <<EOF > app/src/main/cpp/CMakeLists.txt
+          cmake_minimum_required(VERSION 3.10.2)
+          project("comsquare")
+
+          set(SOURCE_DIR \${CMAKE_SOURCE_DIR}/sources)
+          include_directories(\${SOURCE_DIR})
+
+          file(GLOB_RECURSE CORE_SOURCES
+              "\${SOURCE_DIR}/APU/*.cpp"
+              "\${SOURCE_DIR}/Cartridge/*.cpp"
+              "\${SOURCE_DIR}/CPU/*.cpp"
+              "\${SOURCE_DIR}/Memory/*.cpp"
+              "\${SOURCE_DIR}/Models/*.cpp"
+              "\${SOURCE_DIR}/PPU/*.cpp"
+              "\${SOURCE_DIR}/Ram/*.cpp"
+              "\${SOURCE_DIR}/SNES.cpp"
+              "\${SOURCE_DIR}/Utility/*.cpp"
+              "native-lib.cpp"
+          )
+          # Excluir explicitamente arquivos antigos que podem ter sobrado
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Qt.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*SF.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*Debugger.*")
+          list(FILTER CORE_SOURCES EXCLUDE REGEX ".*main.cpp")
+
+          add_library(comsquare SHARED \${CORE_SOURCES})
+          find_library(log-lib log)
+          find_library(jnigraphics-lib jnigraphics)
+          target_link_libraries(comsquare \${log-lib} \${jnigraphics-lib})
+          EOF
+
+      - name: Generate app/build.gradle
+        run: |
+          cat <<EOF > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'kotlin-android'
+          }
+          android {
+              compileSdkVersion 33
+              defaultConfig {
+                  applicationId "com.comsquare.emulator"
+                  minSdkVersion 24
+                  targetSdkVersion 33
+                  versionCode 1
+                  versionName "1.0"
+                  externalNativeBuild {
+                      cmake {
+                          cppFlags "-std=c++20"
+                      }
+                  }
+              }
+              externalNativeBuild {
+                  cmake {
+                      path "src/main/cpp/CMakeLists.txt"
+                  }
+              }
+              namespace 'com.comsquare.emulator'
+          }
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.9.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
+          }
+          EOF
+
+      - name: Generate settings.gradle
+        run: |
+          cat <<EOF > settings.gradle
+          rootProject.name = "ComSquareAndroid"
+          include ':app'
+          EOF
+
+      - name: Generate root build.gradle
+        run: |
+          cat <<EOF > build.gradle
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath "com.android.tools.build:gradle:7.4.2"
+                  classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.0"
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+
+      - name: Move C++ Sources
+        run: |
+          echo "Movendo código C++ original para o módulo Android..."
+          mv sources app/src/main/cpp/
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git add .
+          git commit -m "Port to Android: Structure, JNI Bridge, and Kotlin UI created via Workflow"
+          git push
