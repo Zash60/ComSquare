@@ -1,4 +1,4 @@
-name: Fix AndroidRenderer.hpp Interface
+name: Fix SDL Graphics Stability
 
 on:
   workflow_dispatch:
@@ -7,96 +7,207 @@ permissions:
   contents: write
 
 jobs:
-  fix-renderer-header:
+  fix-graphics:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Fix AndroidRenderer.hpp
+      # 1. Atualiza o AndroidManifest para forçar Landscape e gerenciar configChanges
+      # Isso impede que o Android destrua a Surface ao rotacionar, o que causava o erro BLASTBufferQueue
+      - name: Fix AndroidManifest.xml
         run: |
-          cat <<EOF > app/src/main/cpp/AndroidRenderer.hpp
-          #pragma once
+          cat <<EOF > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="ComSquare SNES"
+                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:hardwareAccelerated="true">
+                  
+                  <activity android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="sensorLandscape"
+                      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+                      android:launchMode="singleTask">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
 
-          #include "Renderer/IRenderer.hpp"
-          #include <SDL.h>
-          #include <vector>
+      # 2. Atualiza native-lib.cpp com configuração OpenGL ES robusta e Logical Scaling
+      - name: Update native-lib.cpp
+        run: |
+          cat <<EOF > app/src/main/cpp/native-lib.cpp
+          #include <jni.h>
+          #include <string>
+          #include <memory>
           #include <android/log.h>
-          #include <span>
+          #include <SDL.h>
+          #include <SDL_main.h>
+          #include <SDL_system.h>
 
-          namespace ComSquare::Renderer {
+          #include "SNES.hpp"
+          #include "AndroidRenderer.hpp"
 
-              class AndroidRenderer : public IRenderer {
-              public:
-                  SDL_Window* window = nullptr;
-                  SDL_Renderer* renderer = nullptr;
-                  SDL_Texture* texture = nullptr;
-                  std::vector<uint32_t> pixelBuffer;
+          #define LOG_TAG "ComSquare_Native"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-                  // Buffer interno do SNES (geralmente 1024x1024 no core atual)
-                  const int BUFFER_WIDTH = 1024;
-                  const int BUFFER_HEIGHT = 1024;
+          // Globais
+          std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
+          std::unique_ptr<ComSquare::SNES> g_snes;
+          std::string g_romPath = "";
+          bool g_romLoaded = false;
 
-                  AndroidRenderer() {
-                      pixelBuffer.resize(BUFFER_WIDTH * BUFFER_HEIGHT, 0xFF000000);
+          // JNI: Recebe caminho da ROM
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_comsquare_emulator_MainActivity_onRomSelectedNative(JNIEnv* env, jobject, jstring path) {
+              const char *nativePath = env->GetStringUTFChars(path, 0);
+              g_romPath = std::string(nativePath);
+              LOGI("ROM Path recebido: %s", nativePath);
+              
+              if (g_snes) {
+                  try {
+                      // Reinicia o emulador ao carregar nova ROM para limpar estado
+                      // g_snes->reset(); // Se existir método reset
+                      g_snes->loadRom(g_romPath);
+                      g_romLoaded = true;
+                      LOGI("ROM carregada com sucesso!");
+                  } catch (const std::exception& e) {
+                      LOGE("Erro ao carregar ROM: %s", e.what());
                   }
+              }
+              env->ReleaseStringUTFChars(path, nativePath);
+          }
 
-                  void initSDL() {
-                      // SDL já foi iniciado no main, aqui pegamos a janela se necessário ou criamos recursos
-                      // No Android, a janela é criada automaticamente pelo SDL_Init
-                      // Criamos apenas o renderer e a textura aqui
+          void callJavaOpenFilePicker() {
+              JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+              jobject activity = (jobject)SDL_AndroidGetActivity();
+              jclass clazz = env->GetObjectClass(activity);
+              jmethodID methodID = env->GetMethodID(clazz, "openFileBrowser", "()V");
+              if (methodID) env->CallVoidMethod(activity, methodID);
+              env->DeleteLocalRef(activity);
+              env->DeleteLocalRef(clazz);
+          }
+
+          int main(int argc, char* argv[]) {
+              LOGI("Inicializando SDL...");
+
+              // 1. Configura atributos GL ANTES de criar a janela para evitar erro libEGL
+              SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+              SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+              SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+              SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+              SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+              if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+                  LOGE("SDL_Init falhou: %s", SDL_GetError());
+                  return 1;
+              }
+
+              // 2. Cria janela em tela cheia e redimensionável (importante para Android)
+              SDL_Window* window = SDL_CreateWindow("ComSquare", 
+                  0, 0, 
+                  0, 0, // Ignorado no Android fullscreen
+                  SDL_WINDOW_FULLSCREEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+
+              if (!window) {
+                  LOGE("Erro ao criar janela: %s", SDL_GetError());
+                  return 1;
+              }
+
+              // 3. Cria renderer. O VSync ajuda a sincronizar com a tela do celular (60Hz)
+              SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+              
+              // 4. Mágica de Escala: Dizemos ao SDL que nossa "resolução lógica" é 256x224 (SNES).
+              // O SDL vai esticar isso automaticamente para encher a tela do celular, mantendo aspecto se quisermos.
+              // Como estamos usando uma textura de 1024x1024 (buffer interno), vamos configurar para isso por enquanto.
+              SDL_RenderSetLogicalSize(renderer, 1024, 1024);
+
+              // Cria textura de streaming
+              SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 1024, 1024);
+
+              // Inicializa Core
+              g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
+              // Passa referências (opcional, dependendo de como AndroidRenderer foi implementado)
+              g_renderer->window = window;
+              g_renderer->renderer = renderer;
+              g_renderer->texture = texture;
+
+              g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
+
+              bool running = true;
+              SDL_Event event;
+              int frameCount = 0;
+
+              while (running) {
+                  while (SDL_PollEvent(&event)) {
+                      if (event.type == SDL_QUIT || event.type == SDL_APP_TERMINATING) {
+                          running = false;
+                      }
+                      if (event.type == SDL_RENDER_DEVICE_RESET) {
+                          LOGI("Dispositivo gráfico resetado, recriando textura...");
+                          // Tratar perda de contexto se necessário
+                      }
                       
-                      // Usa a janela principal do SDL
-                      window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
-                      renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-                      
-                      // Textura para o buffer do SNES (Streaming para atualização constante)
-                      // ABGR8888 é geralmente o formato nativo mais rápido em GPUs Android (GLES)
-                      texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, BUFFER_WIDTH, BUFFER_HEIGHT);
-                      
-                      // Limpa a tela
-                      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-                      SDL_RenderClear(renderer);
-                      SDL_RenderPresent(renderer);
-                  }
-
-                  void setWindowName(std::string &name) override {}
-
-                  void drawScreen() override {
-                      // O desenho real é feito no loop principal do SDL (native-lib.cpp)
-                      // Este método é chamado pelo SNES::update().
-                      // Não fazemos o SDL_RenderPresent aqui para não bloquear a thread de emulação.
-                  }
-
-                  void putPixel(unsigned y, unsigned x, uint32_t rgba) override {
-                      if (x < BUFFER_WIDTH && y < BUFFER_HEIGHT) {
-                          // O SNES envia pixels no formato 0xAABBGGRR (little endian uint32) ou similar.
-                          // Precisamos garantir que bata com a textura SDL (ABGR8888).
-                          // Se as cores ficarem invertidas (Vermelho <-> Azul), trocamos aqui ou na criação da textura.
-                          pixelBuffer[y * BUFFER_WIDTH + x] = rgba;
+                      // Toque na tela para abrir ROM
+                      if (event.type == SDL_FINGERDOWN && !g_romLoaded) {
+                          callJavaOpenFilePicker();
                       }
                   }
 
-                  void createWindow(SNES &snes, int maxFPS) override {
-                      // Stub
+                  // Limpa a tela
+                  SDL_RenderClear(renderer);
+
+                  if (g_romLoaded) {
+                      try {
+                          g_snes->update();
+                          
+                          // Atualiza textura
+                          void* pixels;
+                          int pitch;
+                          if (SDL_LockTexture(texture, nullptr, &pixels, &pitch) == 0) {
+                              // Copia do buffer do emulador para a textura
+                              // g_renderer->getPixels() retorna const void*
+                              memcpy(pixels, g_renderer->getPixels(), 1024 * 1024 * 4);
+                              SDL_UnlockTexture(texture);
+                          }
+                          
+                          // Desenha a textura esticada na tela
+                          SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+                          
+                      } catch (...) {}
+                  } else {
+                      // Tela de Espera (Azul)
+                      SDL_SetRenderDrawColor(renderer, 0, 0, 200, 255);
+                      SDL_RenderFillRect(renderer, nullptr);
                   }
 
-                  void playAudio(std::span<int16_t> samples) override {
-                      // Stub (SDL Audio pode ser adicionado aqui depois)
-                  }
+                  // Mostra na tela
+                  SDL_RenderPresent(renderer);
                   
-                  // Helper para o loop principal acessar os dados brutos
-                  const void* getPixels() const {
-                      return pixelBuffer.data();
-                  }
-              };
+                  // Pequeno delay para não fritar a CPU se o VSync falhar
+                  // Se VSync estiver ativo no CreateRenderer, isso é redundante mas seguro
+                  // SDL_Delay(0); 
+              }
+
+              SDL_Quit();
+              return 0;
           }
           EOF
 
-      - name: Commit and Push changes
+      - name: Commit and Push
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/cpp/AndroidRenderer.hpp
-          git commit -m "Fix: Add getPixels() method to AndroidRenderer for SDL texture update"
+          git add app/src/main/AndroidManifest.xml
+          git add app/src/main/cpp/native-lib.cpp
+          git commit -m "Fix: Force landscape orientation and GLES configuration to solve black screen"
           git push
