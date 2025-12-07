@@ -1,4 +1,4 @@
-name: Fix GCC Header for Android
+name: Fix IPL Header Missing Array
 
 on:
   workflow_dispatch:
@@ -7,120 +7,93 @@ permissions:
   contents: write
 
 jobs:
-  fix-header:
+  fix-ipl:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Replace stdint-gcc.h with cstdint
+      - name: Add <array> include to IPL.hpp
         run: |
-          # O arquivo PPUUtils.hpp inclui um header específico do GCC que não existe no Android (Clang).
-          # Vamos substituí-lo pelo padrão do C++ <cstdint>.
+          FILE_PATH="app/src/main/cpp/sources/APU/IPL/IPL.hpp"
           
-          FILE_PATH="app/src/main/cpp/sources/PPU/PPUUtils.hpp"
-          
-          # Sobrescreve o arquivo com a correção
+          # Recria o arquivo adicionando #include <array>
           cat <<EOF > $FILE_PATH
+          //
+          // Created by Melefo on 27/02/2020.
+          //
+
           #pragma once
 
-          #include <cstdint>
-          #include <cstddef>
-          #include <memory>
           #include <array>
-          #include "Models/Vector2.hpp"
+          #include "Memory/AMemory.hpp"
 
-          namespace ComSquare::PPU
+          namespace ComSquare::APU::IPL
           {
-              class PPU;
-          }
+          	class IPL : public Memory::AMemory {
+          	protected:
+          		//! @brief The Rom.
+          		std::array<uint8_t, 64> _data = {
+          			0xCD, 0xEF, 0xBD, 0xE8, 0x00, 0xC6, 0x1D, 0xD0,
+          			0xFC, 0x8F, 0xAA, 0xF4, 0x8F, 0xBB, 0xF5, 0x78,
+          			0xCC, 0xF4, 0xD0, 0xFB, 0x2F, 0x19, 0xEB, 0xF4,
+          			0xD0, 0xFC, 0x7E, 0xF4, 0xD0, 0x0B, 0xE4, 0xF5,
+          			0xCB, 0xF4, 0xD7, 0x00, 0xFC, 0xD0, 0xF3, 0xAB,
+          			0x01, 0x10, 0xEF, 0x7E, 0xF4, 0x10, 0xEB, 0xBA,
+          			0xF6, 0xDA, 0x00, 0xBA, 0xF4, 0xC4, 0xF4, 0xDD,
+          			0x5D, 0xD0, 0xDB, 0x1F, 0x00, 0x00, 0xC0, 0xFF
+          		};
+          		//! @brief The size of the IPL rom (in bytes).
+          		size_t _size = 64;
+          		//! @brief An id identifying the type of memory this is (for the debugger)
+          		Component _iplType;
+          		//! @brief The name of this ram.
+          		std::string _iplName;
+          	public:
+          		//! @brief Create the rom with its value.
+          		explicit IPL(Component, std::string iplName);
+          		//! @brief The rom can't be copied.
+          		IPL(const IPL &) = delete;
+          		//! @brief The rom can't be assigned.
+          		IPL &operator=(IPL &) = delete;
+          		//! @brief A default destructor
+          		~IPL() override = default;
 
-          namespace ComSquare::PPU::Utils
-          {
-              //! @brief Transform CGRAM color data to 8bits
-              //! @note Used with b, g and r values
-              //! @return The 8 bit value of the color
-              inline uint8_t to8Bit(int color)
-              {
-                  return static_cast<uint8_t>((color << 3) + (color >> 2));
-              }
-              //! @brief Transform SNES color code BGR to uint32_t RGBA
-              //! @param CGRAMColor The color of the CGRAM
-              //! @return The CGRAM color to RGBA format
-              uint32_t CGRAMColorToRGBA(uint16_t CGRAMColor);
-              //! @brief Used to parse easily VRAM Tile information
-              union TileData {
-                  struct {
-                      //! @brief Tile X offset
-                      uint16_t posX: 4;
-                      //! @brief Tile Y offset
-                      uint16_t posY: 6;
-                      //! @brief Palette number used by the Tile
-                      uint16_t palette: 3;
-                      //! @brief True if the Tile has priority
-                      uint16_t tilePriority: 1;
-                      //! @brief True if the Tile need to be horizontally flipped
-                      uint16_t horizontalFlip: 1;
-                      //! @brief True if the Tile need to be vertically flipped
-                      uint16_t verticalFlip: 1;
-                  };
-                  uint16_t raw = 0;
-              };
+          		//! @brief Read data from the component using the same method as the basic IMemory.
+          		//! @param addr The global 24 bits address. This method is responsible of mapping to the component's read.
+          		//! @throw InvalidAddress if the address is not mapped to the component.
+          		//! @return Return the data at the address given as parameter.
+          		uint8_t read(uint24_t addr) override;
 
-              //! @brief Struct to save all specific variables needed for the registers (prev values for example)
-              struct PpuState {
-                  //! @brief Used by by all eight BGnxOFS registers (0x210D - 0x2114)
-                  uint8_t hvSharedScrollPrevValue;
-                  //! @brief Shared by the four BGnHOFS registers
-                  uint8_t hScrollPrevValue;
-              };
+          		//! @brief Write data to this component using the same method as the basic IMemory.
+          		//! @param addr The global 24 bits address. This method is responsible of mapping to the component's write.
+          		//! @param data The new data to write.
+          		//! @throw InvalidAddress if the address is not mapped to the component.
+          		void write(uint24_t addr, uint8_t data) override;
 
-              template <std::size_t DEST_SIZE_Y, std::size_t DEST_SIZE_X, std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
-              void merge2DArray(std::array<std::array<uint32_t, DEST_SIZE_X>, DEST_SIZE_Y> &bufferDest,
-                                const std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &bufferSrc,
-                                const Vector2<int> &offset)
-              {
-                  int offsetY = offset.y;
-                  for (auto &row : bufferSrc) {
-                      std::copy(row.begin(), row.end(), bufferDest[offsetY++].begin() + offset.x);
-                  }
-              }
+          		//! @brief Retrieve the data at the address given. This can be used instead of read or write.
+          		//! @param addr The address of the data to retrieve.
+          		//! @return The data at the address given as parameter.
+          		uint8_t &operator[](uint24_t addr);
+          		//! @brief Retrieve the data at the address given. This can be used instead of read or write.
+          		//! @param addr The address of the data to retrieve.
+          		//! @return The data at the address given as parameter.
+          		const uint8_t &operator[](uint24_t addr) const;
 
-              template <std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
-              void VFlipArray(std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &array,
-                              const Vector2<int> &size,
-                              const Vector2<int> &offset = {0, 0})
-              {
-                  for (int i = offset.y; i < offset.y + size.y; i++) {
-                      std::reverse(array[i].begin() + offset.x, array[i].begin() + offset.x + size.x);
-                  }
-              }
+          		//! @brief Get the size of the data. This size can be lower than the mapped data.
+          		//! @return The number of bytes inside this memory.
+          		[[nodiscard]] uint24_t getSize() const override;
 
-              template <std::size_t SRC_SIZE_Y, std::size_t SRC_SIZE_X>
-              void HFlipArray(std::array<std::array<uint32_t, SRC_SIZE_X>, SRC_SIZE_Y> &array,
-                              const Vector2<int> &size,
-                              const Vector2<int> &offset = {0, 0})
-              {
-                  std::reverse(array.begin() + offset.x, array.begin() + offset.x + size.x);
-              }
+          		//! @brief Get the name of this accessor (used for debug purpose)
+          		[[nodiscard]] std::string getName() const override;
 
-              //! @brief Add a bg buffer to another buffer
-              template <std::size_t DEST_SIZE_X, std::size_t DEST_SIZE_Y, std::size_t SRC_SIZE_X, std::size_t SRC_SIZE_Y>
-              static void addBuffer(std::array<std::array<uint32_t, DEST_SIZE_Y>, DEST_SIZE_X> &bufferDest,
-                             const std::array<std::array<uint32_t, SRC_SIZE_Y>, SRC_SIZE_X> &bufferSrc)
-              {
-                  int i = 0;
-                  int j = 0;
-                  for (const auto &sourceRow : bufferSrc) {
-                      for (const auto &pixel : sourceRow) {
-                          if (pixel > 0xFF)
-                              bufferDest[i][j] = pixel;
-                          j++;
-                      };
-                      j = 0;
-                      i++;
-                  };
-              }
+          		//! @brief Get the component of this accessor (used for debug purpose)
+          		[[nodiscard]] Component getComponent() const override;
+
+          		//! @brief Get the name of the data at the address
+          		//! @param addr The address (in local space)
+          		[[nodiscard]] std::string getValueName(uint24_t addr) const override;
+          	};
           }
           EOF
 
@@ -128,6 +101,6 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git add app/src/main/cpp/sources/PPU/PPUUtils.hpp
-          git commit -m "Fix: Replace stdint-gcc.h with cstdint for Android Clang compatibility"
+          git add app/src/main/cpp/sources/APU/IPL/IPL.hpp
+          git commit -m "Fix: Add <array> include to IPL.hpp for NDK build"
           git push
