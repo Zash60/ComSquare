@@ -8,72 +8,85 @@
 #include "SNES.hpp"
 #include "AndroidRenderer.hpp"
 
-// Globais
+// Log tag
+#define LOG_TAG "ComSquare"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
 std::unique_ptr<ComSquare::Renderer::AndroidRenderer> g_renderer;
 std::unique_ptr<ComSquare::SNES> g_snes;
-std::string g_romPath = "";
-bool g_romLoaded = false;
 
-// Função JNI para receber o caminho da ROM do Kotlin
-extern "C" JNIEXPORT void JNICALL
-Java_com_comsquare_emulator_MainActivity_loadRomNative(JNIEnv* env, jobject, jstring path) {
-    const char *nativePath = env->GetStringUTFChars(path, 0);
-    g_romPath = std::string(nativePath);
-    __android_log_print(ANDROID_LOG_INFO, "ComSquare", "ROM Path received: %s", nativePath);
-    env->ReleaseStringUTFChars(path, nativePath);
-}
-
-// Ponto de entrada SDL
 int main(int argc, char* argv[]) {
+    LOGI("Iniciando SDL Main...");
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
-        __android_log_print(ANDROID_LOG_ERROR, "ComSquare", "SDL_Init failed: %s", SDL_GetError());
+        LOGE("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
 
+    // Cria janela SDL
+    SDL_Window* window = SDL_CreateWindow("ComSquare", 0, 0, 0, 0, SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_OPENGL);
+    if (!window) {
+        LOGE("Failed to create window: %s", SDL_GetError());
+        return 1;
+    }
+
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) {
+         LOGE("Failed to create renderer: %s", SDL_GetError());
+         return 1;
+    }
+
+    // Tenta iniciar o SNES
     g_renderer = std::make_unique<ComSquare::Renderer::AndroidRenderer>();
-    g_renderer->initSDL(); // Cria janela e renderer SDL
-    
+    // Hack: Injeta os ponteiros do SDL no nosso renderer customizado
+    g_renderer->window = window;
+    g_renderer->renderer = renderer;
+    g_renderer->texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING, 1024, 1024);
+
     g_snes = std::make_unique<ComSquare::SNES>(*g_renderer);
+
+    // Tenta carregar uma ROM hardcoded (coloque o arquivo em /sdcard/Download/game.sfc para testar depois)
+    // Ou apenas desenha uma cor para teste
+    bool romLoaded = false;
+    /* 
+    try {
+        g_snes->loadRom("/sdcard/Download/game.sfc"); // Caminho de teste
+        romLoaded = true;
+    } catch (...) {} 
+    */
 
     bool running = true;
     SDL_Event event;
+    int color = 0;
 
     while (running) {
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
+            if (event.type == SDL_QUIT || event.type == SDL_APP_TERMINATING) {
                 running = false;
             }
-            if (event.type == SDL_APP_TERMINATING) {
-                running = false;
+            // Toque na tela fecha ou faz algo
+            if (event.type == SDL_FINGERDOWN) {
+                 LOGI("Touch detected!");
             }
         }
 
-        // Lógica de Carga de ROM
-        if (!g_romLoaded && !g_romPath.empty()) {
-            try {
-                g_snes->loadRom(g_romPath);
-                g_romLoaded = true;
-                __android_log_print(ANDROID_LOG_INFO, "ComSquare", "ROM Loaded Successfully in Core");
-            } catch (const std::exception& e) {
-                __android_log_print(ANDROID_LOG_ERROR, "ComSquare", "Load Error: %s", e.what());
-                g_romPath = ""; // Tenta de novo se o usuário mandar outro
-            }
-        }
-
-        if (g_romLoaded) {
+        if (romLoaded) {
             try {
                 g_snes->update();
-                // O update do SNES chama g_renderer->drawScreen() internamente
-            } catch (...) {
-                 // Evita crash
-            }
+                // O update chama drawScreen() do renderer
+            } catch (...) {}
         } else {
-            // Se não tem ROM, desenha tela preta ou de espera
-            SDL_SetRenderDrawColor(g_renderer->renderer, 20, 20, 20, 255);
-            SDL_RenderClear(g_renderer->renderer);
-            SDL_RenderPresent(g_renderer->renderer);
-            SDL_Delay(100);
+            // MODO DE DEBUG VISUAL:
+            // Se não tem ROM, pisca a tela para provar que o vídeo funciona
+            color = (color + 5) % 255;
+            SDL_SetRenderDrawColor(renderer, color, 0, 0, 255); // Vermelho pulsante
+            SDL_RenderClear(renderer);
+            SDL_RenderPresent(renderer);
         }
+        
+        // Limita FPS tosco
+        SDL_Delay(16);
     }
 
     SDL_Quit();
